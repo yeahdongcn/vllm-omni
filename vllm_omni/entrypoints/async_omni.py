@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncGenerator, Iterable, Sequence
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from vllm.engine.protocol import EngineClient
@@ -139,6 +139,10 @@ class AsyncOmni(EngineClient, OmniBase):
         tokenization_kwargs: dict[str, Any] | None = None,
         sampling_params_list: Sequence[OmniSamplingParams] | None = None,
         output_modalities: list[str] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        priority: int = 0,
+        data_parallel_rank: int | None = None,
+        reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[OmniRequestOutput, None]:
         """Generate outputs for the given prompt asynchronously.
 
@@ -195,6 +199,12 @@ class AsyncOmni(EngineClient, OmniBase):
                 prompt=prompt,
                 sampling_params_list=sampling_params_list,
                 final_stage_id=final_stage_id_for_e2e,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
+                reasoning_ended=reasoning_ended,
             )
             submit_ts = time.time()
             req_state.metrics.stage_first_ts[0] = submit_ts
