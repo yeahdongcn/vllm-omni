@@ -167,7 +167,13 @@ class WanRotaryPosEmbed(nn.Module):
         # Split dimensions for temporal, height, width
         h_dim = w_dim = 2 * (attention_head_dim // 6)
         t_dim = attention_head_dim - h_dim - w_dim
-        freqs_dtype = torch.float32 if torch.backends.mps.is_available() else torch.float64
+        # MUSA doesn't support float64, use float32 instead
+        from vllm_omni.platforms import current_omni_platform
+
+        if torch.backends.mps.is_available() or current_omni_platform.is_musa():
+            freqs_dtype = torch.float32
+        else:
+            freqs_dtype = torch.float64
 
         freqs_cos = []
         freqs_sin = []
