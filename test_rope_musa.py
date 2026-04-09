@@ -1,13 +1,36 @@
 #!/usr/bin/env python
-"""Test script for RoPE on MUSA device."""
+"""Test script for RoPE on MUSA device.
+
+Direct import bypassing vllm_omni.__init__ to avoid vllm version mismatch issues.
+"""
+
+import importlib.util
+import sys
 
 import torch
+import torch_musa  # noqa: F401  Required for MUSA device support
 
-from vllm_omni.diffusion.layers.rope import RotaryEmbedding
+print("torch and torch_musa loaded")
 
-print("RotaryEmbedding imported successfully")
+# Direct module loading bypassing __init__.py chain
+spec = importlib.util.spec_from_file_location("rope_module", "/root/vllm-omni/vllm_omni/diffusion/layers/rope.py")
+rope_module = importlib.util.module_from_spec(spec)
 
-# Test forward_cuda import path
+# Need to preload dependencies
+custom_op_spec = importlib.util.spec_from_file_location(
+    "custom_op", "/root/vllm-omni/vllm_omni/diffusion/layers/custom_op.py"
+)
+custom_op_module = importlib.util.module_from_spec(custom_op_spec)
+sys.modules["vllm_omni.diffusion.layers.custom_op"] = custom_op_module
+custom_op_spec.loader.exec_module(custom_op_module)
+
+# Now load rope module
+spec.loader.exec_module(rope_module)
+
+print("rope module loaded directly")
+
+# Test RotaryEmbedding
+RotaryEmbedding = rope_module.RotaryEmbedding
 rope = RotaryEmbedding(is_neox_style=True)
 print("RotaryEmbedding instance created")
 
