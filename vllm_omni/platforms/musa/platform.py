@@ -8,7 +8,6 @@ from vllm.logger import init_logger
 from vllm_musa.platform import MUSAPlatformBase
 
 from vllm_omni.diffusion.attention.backends.registry import DiffusionAttentionBackendEnum
-from vllm_omni.diffusion.attention.backends.utils.fa import is_mate_available
 from vllm_omni.platforms.interface import OmniPlatform, OmniPlatformEnum
 
 logger = init_logger(__name__)
@@ -65,6 +64,7 @@ class MUSAOmniPlatform(OmniPlatform, MUSAPlatformBase):
         Returns:
             Fully qualified class path of the selected backend.
         """
+        from vllm_omni.diffusion.attention.backends.utils.fa import is_mate_available
 
         flash_attn_available = is_mate_available()
 

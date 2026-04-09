@@ -17,71 +17,112 @@ from functools import lru_cache
 import torch
 import torch.nn.functional as F
 
-from vllm_omni.platforms import current_omni_platform
-
-# Flash Attention function detection with fallback chain
+# Flash Attention function detection - deferred to avoid circular imports
 flash_attn_func = None
 flash_attn_varlen_func = None
 
-if current_omni_platform.is_rocm():
-    # ROCm: try Aiter first
-    try:
-        from vllm._aiter_ops import is_aiter_found_and_supported
 
-        if is_aiter_found_and_supported():
-            from aiter import flash_attn_func, flash_attn_varlen_func  # noqa: F401
-    except (ImportError, ModuleNotFoundError):
-        pass
-elif current_omni_platform.is_xpu():
-    try:
-        from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func  # noqa: F401
-    except (ImportError, ModuleNotFoundError):
-        pass
-elif current_omni_platform.is_musa():
-    try:
-        from mate import flash_attn_varlen_func  # noqa: F401
-    except (ImportError, ModuleNotFoundError):
-        pass
-else:
-    # CUDA: try FA3 -> FA2 fallback chain
-    # Try FA3 from fa3-fwd PyPI package
-    try:
-        from fa3_fwd_interface import flash_attn_func, flash_attn_varlen_func  # noqa: F401
-    except (ImportError, ModuleNotFoundError):
-        pass
+def _init_flash_attn_funcs():
+    """Initialize flash attention functions based on current platform.
 
-    # Fallback: Try FA3 from flash-attention source build
-    if flash_attn_func is None:
+    Deferred initialization to avoid circular imports with platform modules.
+    """
+    global flash_attn_func, flash_attn_varlen_func
+
+    from vllm_omni.platforms import current_omni_platform
+
+    if current_omni_platform.is_rocm():
+        # ROCm: try Aiter first
+        try:
+            from vllm._aiter_ops import is_aiter_found_and_supported
+
+            if is_aiter_found_and_supported():
+                from aiter import flash_attn_func, flash_attn_varlen_func  # noqa: F401
+
+                return
+        except (ImportError, ModuleNotFoundError):
+            pass
+    elif current_omni_platform.is_xpu():
+        try:
+            from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func  # noqa: F401
+
+            return
+        except (ImportError, ModuleNotFoundError):
+            pass
+    elif current_omni_platform.is_musa():
+        try:
+            from mate import flash_attn_varlen_func  # noqa: F401
+
+            return
+        except (ImportError, ModuleNotFoundError):
+            pass
+    else:
+        # CUDA: try FA3 -> FA2 fallback chain
+        # Try FA3 from fa3-fwd PyPI package
+        try:
+            from fa3_fwd_interface import flash_attn_func, flash_attn_varlen_func  # noqa: F401
+
+            return
+        except (ImportError, ModuleNotFoundError):
+            pass
+
+        # Fallback: Try FA3 from flash-attention source build
         try:
             from flash_attn_interface import flash_attn_func, flash_attn_varlen_func  # noqa: F401
+
+            return
         except (ImportError, ModuleNotFoundError):
             pass
 
-    # Fallback: Try FA2 from flash-attn package (try multiple import paths)
-    if flash_attn_func is None:
+        # Fallback: Try FA2 from flash-attn package (try multiple import paths)
         try:
             from flash_attn import flash_attn_func, flash_attn_varlen_func  # noqa: F401
+
+            return
         except (ImportError, ModuleNotFoundError):
             pass
 
-    if flash_attn_func is None:
         try:
             from flash_attn.flash_attn_interface import (  # noqa: F401
                 flash_attn_func,
                 flash_attn_varlen_func,
             )
+
+            return
         except (ImportError, ModuleNotFoundError):
             pass
 
-# If no FA backend available, SDPA backend will be selected at the platform level
-# flash_attn_func and flash_attn_varlen_func will be None
-HAS_FLASH_ATTN = flash_attn_func is not None or flash_attn_varlen_func is not None
+
+@lru_cache(maxsize=1)
+def _get_flash_attn_funcs():
+    """Cached getter for flash attention functions."""
+    _init_flash_attn_funcs()
+    return flash_attn_func, flash_attn_varlen_func
 
 
 @lru_cache(maxsize=1)
 def is_mate_available() -> bool:
     """Check if MATE (MUSA Flash Attention) is available."""
-    return current_omni_platform.is_musa() and flash_attn_varlen_func is not None
+    from vllm_omni.platforms import current_omni_platform
+
+    if not current_omni_platform.is_musa():
+        return False
+
+    try:
+        from mate import flash_attn_varlen_func  # noqa: F401
+
+        return True
+    except (ImportError, ModuleNotFoundError):
+        return False
+
+
+def get_has_flash_attn() -> bool:
+    """Check if any flash attention backend is available."""
+    fa_func, fa_varlen_func = _get_flash_attn_funcs()
+    return fa_func is not None or fa_varlen_func is not None
+
+
+HAS_FLASH_ATTN = None  # Will be computed lazily via get_has_flash_attn()
 
 
 def _index_first_axis(tensor, indices):
