@@ -151,7 +151,7 @@ class RotaryEmbedding(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        return self.forward_native(x, cos, sin)
+        return self.forward_cuda(x, cos, sin)
 
     def forward_native(
         self,
