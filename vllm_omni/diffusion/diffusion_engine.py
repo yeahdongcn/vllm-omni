@@ -196,6 +196,10 @@ class DiffusionEngine:
                         prompt=prompt,
                         metrics=metrics,
                         latents=output.trajectory_latents,
+                        trajectory_latents=output.trajectory_latents,
+                        trajectory_timesteps=output.trajectory_timesteps,
+                        trajectory_log_probs=output.trajectory_log_probs,
+                        trajectory_decoded=output.trajectory_decoded,
                         multimodal_output={"audio": request_audio_payload},
                         final_output_type="audio",
                         stage_durations=output.stage_durations,
@@ -252,6 +256,10 @@ class DiffusionEngine:
                             prompt=prompt,
                             metrics=metrics,
                             latents=output.trajectory_latents,
+                            trajectory_latents=output.trajectory_latents,
+                            trajectory_timesteps=output.trajectory_timesteps,
+                            trajectory_log_probs=output.trajectory_log_probs,
+                            trajectory_decoded=output.trajectory_decoded,
                             multimodal_output={"audio": request_audio_payload},
                             final_output_type="audio",
                             stage_durations=output.stage_durations,
@@ -353,15 +361,11 @@ class DiffusionEngine:
                     )
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
-        """Start or stop torch profiling on all diffusion workers.
+        """Start or stop profiling on all diffusion workers.
 
         Args:
             is_start: True to start profiling, False to stop.
-            profile_prefix: Optional prefix for trace filename (vLLM compat).
-
-        Note:
-            Matches vLLM's worker.profile() signature for consistency.
-            Traces are saved automatically via on_trace_ready callback.
+            profile_prefix: Optional prefix for trace filename.
         """
         if is_start:
             if profile_prefix is None:
