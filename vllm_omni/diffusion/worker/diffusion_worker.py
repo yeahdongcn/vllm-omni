@@ -116,6 +116,15 @@ class DiffusionWorker:
         vllm_config.parallel_config.data_parallel_size = self.od_config.parallel_config.data_parallel_size
         vllm_config.parallel_config.enable_expert_parallel = self.od_config.parallel_config.enable_expert_parallel
         vllm_config.profiler_config = self.od_config.profiler_config
+        # Upstream Fp8LinearMethod (since ad2b1277f) reads
+        # get_current_vllm_config().model_config.dtype during __init__. Diffusion
+        # workers do not construct a full vllm ModelConfig, so expose a minimal
+        # stand-in carrying the diffusion dtype. This keeps upstream quantization
+        # init paths happy without inventing a full ModelConfig.
+        if vllm_config.model_config is None:
+            from types import SimpleNamespace
+
+            vllm_config.model_config = SimpleNamespace(dtype=self.od_config.dtype)
         self.vllm_config = vllm_config
 
         # Initialize distributed environment
