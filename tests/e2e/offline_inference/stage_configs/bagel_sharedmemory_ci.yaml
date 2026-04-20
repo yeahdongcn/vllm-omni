@@ -13,7 +13,12 @@ stage_args:
       model_arch: OmniBagelForConditionalGeneration
       worker_type: ar
       scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
-      gpu_memory_utilization: 0.9
+      # LLM and diffusion stages share GPU 0 in this CI config. The diffusion
+      # worker loads ~28 GiB of Bagel weights into the same device, so we
+      # cap the LLM stage at 0.6 of an 80 GiB H100 (~48 GiB). Any higher and
+      # vLLM's KV-cache allocator blows past free memory and OOMs; any lower
+      # and the profile pass's activation peak leaves no room for KV blocks.
+      gpu_memory_utilization: 0.6
       enforce_eager: true
       trust_remote_code: true
       engine_output_type: text

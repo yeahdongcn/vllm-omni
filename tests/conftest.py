@@ -1084,6 +1084,57 @@ def cosine_similarity_text(text1, text2, n: int = 3):
     return dot_product / (norm1 * norm2)
 
 
+def cosine_similarity_streaming_aligned(text1, text2, n: int = 3):
+    """Length-aligned cosine similarity for stream=True text+audio comparisons.
+
+    Streaming OpenAI clients stop consuming chunks once the text-side emits
+    ``finish_reason=stop``. In multi-stage omni pipelines the audio side
+    (Code2Wav) can still be mid-flight at that moment, so the Whisper
+    transcript of the received audio is a strict *prefix* of what the model
+    intended to speak. Comparing the full-length transcript against the full
+    streamed text then underflows even when both agree on their overlap.
+
+    This helper preprocesses both strings, truncates each to the shared
+    prefix length, and computes n-gram cosine similarity on the overlap. For
+    non-truncated responses (equal lengths) it is identical to
+    :func:`cosine_similarity_text`.
+    """
+    from collections import Counter
+
+    if not text1 or not text2:
+        return 0.0
+
+    text1 = preprocess_text(text1)
+    text2 = preprocess_text(text2)
+    min_len = min(len(text1), len(text2))
+    if min_len == 0:
+        return 0.0
+    text1 = text1[:min_len]
+    text2 = text2[:min_len]
+    print(f"cosine similarity (aligned) text1 is: {text1}, text2 is: {text2}")
+
+    if min_len < n:
+        return 1.0 if text1 == text2 else 0.0
+
+    ngrams1 = [text1[i : i + n] for i in range(min_len - n + 1)]
+    ngrams2 = [text2[i : i + n] for i in range(min_len - n + 1)]
+
+    counter1 = Counter(ngrams1)
+    counter2 = Counter(ngrams2)
+
+    all_ngrams = set(counter1.keys()) | set(counter2.keys())
+    vec1 = [counter1.get(ng, 0) for ng in all_ngrams]
+    vec2 = [counter2.get(ng, 0) for ng in all_ngrams]
+
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    norm1 = sum(a * a for a in vec1) ** 0.5
+    norm2 = sum(b * b for b in vec2) ** 0.5
+
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    return dot_product / (norm1 * norm2)
+
+
 def convert_audio_to_text(audio_data):
     """
     Convert base64 encoded audio data to text using speech recognition.
@@ -2389,7 +2440,13 @@ class OpenAIClientHandler:
                     result.audio_bytes = wav_buf.getvalue()
                     audio_content = convert_audio_bytes_to_text(result.audio_bytes)
                 if audio_content and text_content:
-                    similarity = cosine_similarity_text(audio_content.lower(), text_content.lower())
+                    # Streaming text+audio responses can close before Code2Wav
+                    # drains, yielding a transcript that is a prefix of the
+                    # intended speech. Compare on the shared prefix so the
+                    # audio/text agreement isn't masked by truncation.
+                    similarity = cosine_similarity_streaming_aligned(
+                        audio_content.lower(), text_content.lower()
+                    )
 
             # Populate result object
             result.text_content = text_content
