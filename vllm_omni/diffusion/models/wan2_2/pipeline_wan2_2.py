@@ -22,6 +22,7 @@ from vllm_omni.diffusion.distributed.autoencoders.autoencoder_kl_wan import Dist
 from vllm_omni.diffusion.distributed.cfg_parallel import CFGParallelMixin
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
+from vllm_omni.diffusion.model_loader.hub_prefetch import prefetch_subfolders
 from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin, _is_rank_zero
 from vllm_omni.diffusion.models.schedulers import FlowUniPCMultistepScheduler
 from vllm_omni.diffusion.models.wan2_2.scheduling_wan_euler import WanEulerScheduler
@@ -326,6 +327,16 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
                     fall_back_to_pt=True,
                 )
             )
+
+        # See ``hub_prefetch.py`` for the transformers v5 subfolder race.
+        # Wan2.2 also keeps the VAE / text_encoder weights in multi-shard
+        # safetensors, so prefetching them warm before the first worker's
+        # from_pretrained call materially shrinks the race window.
+        prefetch_subfolders(
+            model,
+            ["tokenizer", "text_encoder", "vae"],
+            local_files_only=local_files_only,
+        )
 
         self.tokenizer = AutoTokenizer.from_pretrained(model, subfolder="tokenizer", local_files_only=local_files_only)
         self.text_encoder = UMT5EncoderModel.from_pretrained(

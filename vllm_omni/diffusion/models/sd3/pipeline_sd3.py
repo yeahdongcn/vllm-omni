@@ -19,6 +19,7 @@ from vllm_omni.diffusion.distributed.autoencoders.autoencoder_kl import Distribu
 from vllm_omni.diffusion.distributed.cfg_parallel import CFGParallelMixin
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
+from vllm_omni.diffusion.model_loader.hub_prefetch import prefetch_subfolders
 from vllm_omni.diffusion.models.sd3.sd3_transformer import (
     SD3Transformer2DModel,
 )
@@ -151,6 +152,24 @@ class StableDiffusion3Pipeline(nn.Module, CFGParallelMixin, DiffusionPipelinePro
         model = od_config.model
         # Check if model is a local path
         local_files_only = os.path.exists(model)
+
+        # See ``hub_prefetch.py`` for the transformers v5 subfolder race.
+        # SD3.5 loads six subfolders in a row, each with multi-shard
+        # safetensors - it is the worst-case fan-out for the race window.
+        prefetch_subfolders(
+            model,
+            [
+                "scheduler",
+                "tokenizer",
+                "tokenizer_2",
+                "tokenizer_3",
+                "text_encoder",
+                "text_encoder_2",
+                "text_encoder_3",
+                "vae",
+            ],
+            local_files_only=local_files_only,
+        )
 
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             model, subfolder="scheduler", local_files_only=local_files_only

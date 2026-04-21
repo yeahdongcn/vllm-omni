@@ -22,6 +22,7 @@ from vllm_omni.diffusion.distributed.autoencoders.autoencoder_kl_wan import Dist
 from vllm_omni.diffusion.distributed.cfg_parallel import CFGParallelMixin
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
+from vllm_omni.diffusion.model_loader.hub_prefetch import prefetch_subfolders
 from vllm_omni.diffusion.models.interface import SupportImageInput
 from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin, _is_rank_zero
 from vllm_omni.diffusion.models.wan2_2.pipeline_wan2_2 import (
@@ -215,15 +216,23 @@ class Wan22I2VPipeline(
                 )
             )
 
+        # Image encoder (CLIP) - optional, for Wan2.1-style I2V
+        self.has_image_encoder = "image_encoder" in model_index and model_index["image_encoder"][0] is not None
+
+        # See ``hub_prefetch.py`` for the transformers v5 subfolder race.
+        # I2V can additionally carry a CLIP image-encoder subfolder, so we
+        # prefetch it conditionally based on what model_index advertises.
+        _i2v_subfolders = ["tokenizer", "text_encoder", "vae"]
+        if self.has_image_encoder:
+            _i2v_subfolders.extend(["image_processor", "image_encoder"])
+        prefetch_subfolders(model, _i2v_subfolders, local_files_only=local_files_only)
+
         # Text encoder
         self.tokenizer = AutoTokenizer.from_pretrained(model, subfolder="tokenizer", local_files_only=local_files_only)
         self.tokenizer_max_length = WAN22_MAX_SEQUENCE_LENGTH
         self.text_encoder = UMT5EncoderModel.from_pretrained(
             model, subfolder="text_encoder", torch_dtype=dtype, local_files_only=local_files_only
         ).to(self.device)
-
-        # Image encoder (CLIP) - optional, for Wan2.1-style I2V
-        self.has_image_encoder = "image_encoder" in model_index and model_index["image_encoder"][0] is not None
 
         if self.has_image_encoder:
             self.image_processor = CLIPImageProcessor.from_pretrained(
