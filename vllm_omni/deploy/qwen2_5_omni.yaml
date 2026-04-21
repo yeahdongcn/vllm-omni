@@ -34,7 +34,7 @@ stages:
 
   - stage_id: 1
     max_num_seqs: 1
-    gpu_memory_utilization: 0.8
+    gpu_memory_utilization: 0.6
     enforce_eager: true
     devices: "1"
     default_sampling_params:
@@ -45,7 +45,7 @@ stages:
       seed: 42
       repetition_penalty: 1.05
 
-  - stage_id: 2
+  - stage_id: 1
     max_num_seqs: 1
     gpu_memory_utilization: 0.15
     enforce_eager: true
@@ -69,7 +69,7 @@ platforms:
         enforce_eager: false
       - stage_id: 2
         # 3-NPU layout: stage 2 lives on its own card.
-        devices: "2"
+        devices: "1"
 
   rocm:
     stages:

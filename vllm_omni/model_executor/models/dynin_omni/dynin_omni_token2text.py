@@ -231,6 +231,30 @@ class DyninOmniToken2Text(DyninOmniStageBase):
             # instance attribute when the config actually carries a plan).
             if getattr(dynin_model_cls, "_tp_plan", None) is None:
                 dynin_model_cls._tp_plan = {}
+            # transformers>=5.0 `_finalize_model_loading` calls
+            # `model.tie_weights(missing_keys=..., recompute_mapping=...)` while
+            # the remote Dynin code still defines `tie_weights(self)` with no
+            # keyword arguments, raising
+            # `TypeError: LLaDAModelLM.tie_weights() got an unexpected keyword
+            # argument 'missing_keys'`. Wrap the method once to silently drop
+            # the new kwargs; the remote implementation is a no-op w.r.t. the
+            # missing-keys bookkeeping transformers would otherwise perform.
+            _orig_tie_weights = dynin_model_cls.tie_weights
+            if not getattr(_orig_tie_weights, "_dynin_accepts_v5_kwargs", False):
+                _tie_sig = inspect.signature(_orig_tie_weights)
+                _tie_accepts_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in _tie_sig.parameters.values())
+                _tie_accepts_new_kwargs = _tie_accepts_var_kw or (
+                    "missing_keys" in _tie_sig.parameters and "recompute_mapping" in _tie_sig.parameters
+                )
+                if not _tie_accepts_new_kwargs:
+
+                    def _tie_weights_shim(self, *args, **kwargs):
+                        kwargs.pop("missing_keys", None)
+                        kwargs.pop("recompute_mapping", None)
+                        return _orig_tie_weights(self, *args, **kwargs)
+
+                    _tie_weights_shim._dynin_accepts_v5_kwargs = True  # type: ignore[attr-defined]
+                    dynin_model_cls.tie_weights = _tie_weights_shim
             try:
                 return dynin_model_cls.from_pretrained(
                     model_path,

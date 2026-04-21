@@ -14,6 +14,7 @@ Equivalent to running:
         --image-path 2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg
 """
 
+import os
 import socket
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,18 @@ from tests.conftest import OmniRunner, modify_stage_config
 from tests.utils import hardware_test
 from vllm_omni import Omni
 from vllm_omni.platforms import current_omni_platform
+
+# When set to a truthy value, the test skips the pixel-tolerance assertion and
+# instead dumps the ten sampled RGB values in a copy-pastable block. Use this
+# to regenerate ``REFERENCE_PIXELS`` after a stack update (e.g. transformers
+# v5 rebase) where the deterministic output has shifted to a new stable value
+# but the old baseline no longer matches within ``PIXEL_TOLERANCE``.
+#
+# Usage in CI:
+#   BAGEL_UPDATE_REFERENCE=1 pytest tests/e2e/offline_inference/test_bagel_img2img.py
+# then copy the printed ``REFERENCE_PIXELS`` block from stdout back into this
+# file and ship the diff.
+_BAGEL_UPDATE_REFERENCE_ENV = "BAGEL_UPDATE_REFERENCE"
 
 # Reference pixel data extracted from the known-good output image
 # Generated with seed=52, num_inference_steps=15,
@@ -118,6 +131,31 @@ def _extract_generated_image(omni_outputs: list) -> Image.Image | None:
     return None
 
 
+def _should_update_reference() -> bool:
+    """Return True when the caller wants us to dump, not assert, pixel values."""
+    return os.environ.get(_BAGEL_UPDATE_REFERENCE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dump_reference_pixels(
+    image: Image.Image,
+    reference_pixels: list[dict[str, Any]] = REFERENCE_PIXELS,
+) -> None:
+    """Print the sampled RGB values in ``REFERENCE_PIXELS`` source form.
+
+    The output is framed by ``<<<BAGEL_REFERENCE_PIXELS>>>`` markers so CI
+    log-scraping scripts can extract the block deterministically.
+    """
+    print(f"<<<BAGEL_REFERENCE_PIXELS platform={current_omni_platform.device_type}>>>")
+    print("REFERENCE_PIXELS = [")
+    for ref in reference_pixels:
+        x, y = ref["position"]
+        actual = image.getpixel((x, y))[:3]
+        r, g, b = int(actual[0]), int(actual[1]), int(actual[2])
+        print(f'    {{"position": ({x}, {y}), "rgb": ({r}, {g}, {b})}},')
+    print("]")
+    print("<<<END_BAGEL_REFERENCE_PIXELS>>>")
+
+
 def _validate_pixels(
     image: Image.Image,
     reference_pixels: list[dict[str, Any]] = REFERENCE_PIXELS,
@@ -125,14 +163,24 @@ def _validate_pixels(
 ) -> None:
     """Validate that image pixels match expected reference values.
 
+    When the ``BAGEL_UPDATE_REFERENCE`` environment variable is truthy, the
+    assertion is bypassed and the observed pixel values are dumped instead
+    (see ``_dump_reference_pixels``) so operators can regenerate the baseline
+    after a deterministic-but-shifted stack update.
+
     Args:
         image: The PIL Image to validate.
         reference_pixels: List of dicts with 'position' (x, y) and 'rgb' (R, G, B).
         tolerance: Maximum allowed difference per color channel.
 
     Raises:
-        AssertionError: If any pixel differs beyond tolerance.
+        AssertionError: If any pixel differs beyond tolerance (only when the
+            ``BAGEL_UPDATE_REFERENCE`` env var is unset / falsy).
     """
+    if _should_update_reference():
+        _dump_reference_pixels(image, reference_pixels)
+        return
+
     for ref in reference_pixels:
         x, y = ref["position"]
         expected = ref["rgb"]
