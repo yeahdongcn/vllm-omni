@@ -45,7 +45,7 @@ stages:
       seed: 42
       repetition_penalty: 1.05
 
-  - stage_id: 1
+  - stage_id: 2
     max_num_seqs: 1
     gpu_memory_utilization: 0.15
     enforce_eager: true
