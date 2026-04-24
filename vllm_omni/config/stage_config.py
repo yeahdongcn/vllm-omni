@@ -610,7 +610,7 @@ def _apply_platform_overrides(
 ) -> DeployConfig:
     """Merge platform-specific stage overrides into deploy config."""
     if platform is None:
-        from vllm.platforms import current_platform
+        from vllm_omni.platforms import current_omni_platform
 
         platform = current_platform.device_name.lower()
     if platform is None or deploy.platforms is None:
