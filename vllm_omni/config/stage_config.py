@@ -612,7 +612,7 @@ def _apply_platform_overrides(
     if platform is None:
         from vllm_omni.platforms import current_omni_platform
 
-        platform = current_platform.device_name.lower()
+        platform = current_omni_platform.device_name.lower()
     if platform is None or deploy.platforms is None:
         return deploy
     platform_section = deploy.platforms.get(platform)
