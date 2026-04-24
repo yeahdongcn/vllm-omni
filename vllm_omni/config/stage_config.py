@@ -593,7 +593,7 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
 
 
 def _detect_platform() -> str | None:
-    """Return "npu", "rocm", "xpu", or None (CUDA default)."""
+    """Return "npu", "rocm", "xpu", "musa", or None (CUDA default)."""
     try:
         from vllm.platforms import current_platform
 
@@ -604,6 +604,8 @@ def _detect_platform() -> str | None:
             return "rocm"
         if "xpu" in name:
             return "xpu"
+        if "musa" in name:
+            return "musa"
     except Exception as e:
         logger.debug("Platform auto-detect failed, falling back to CUDA: %s", e)
     return None
