@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from pytest_mock import MockerFixture
 from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 
+from vllm_omni.entrypoints.omni_base import OmniEngineDeadError
 from vllm_omni.entrypoints.openai import api_server as api_server_module
 from vllm_omni.entrypoints.openai.audio_utils_mixin import AudioMixin
 from vllm_omni.entrypoints.openai.protocol.audio import (
@@ -683,6 +684,32 @@ class TestTTSMethods:
 
         assert server._is_tts is True
         assert server._tts_stage is mock_stage
+
+    def test_prepare_speech_rejects_non_tts_omni_model(self, mocker: MockerFixture):
+        """Multi-stage omni models (e.g. Qwen3-Omni) must not use /v1/audio/speech."""
+        mock_engine_client = mocker.MagicMock()
+        mock_engine_client.errored = False
+        mock_engine_client.tts_max_instructions_length = None
+
+        # Simulate Qwen3-Omni: multiple stages, none in _TTS_MODEL_STAGES
+        thinker = SimpleNamespace(engine_args=SimpleNamespace(model_stage="thinker"), tts_args={})
+        talker = SimpleNamespace(engine_args=SimpleNamespace(model_stage="talker"), tts_args={})
+        code2wav = SimpleNamespace(engine_args=SimpleNamespace(model_stage="code2wav"), tts_args={})
+        mock_engine_client.stage_configs = [thinker, talker, code2wav]
+
+        mock_models = mocker.MagicMock()
+        mock_models.is_base_model.return_value = True
+        server = OmniOpenAIServingSpeech(
+            engine_client=mock_engine_client,
+            models=mock_models,
+            request_logger=mocker.MagicMock(),
+        )
+        assert server._is_tts is False
+
+        request = OpenAICreateSpeechRequest(input="Hello world")
+        with pytest.raises(ValueError, match="only supported for dedicated TTS models"):
+            asyncio.run(server._prepare_speech_generation(request))
+        server.shutdown()
 
     def test_estimate_prompt_len_fallback(self, speech_server):
         """Test prompt length estimation falls back to 2048 when model is unavailable."""
@@ -1679,6 +1706,77 @@ def test_api_server_create_speech_wraps_error_response_status(mocker: MockerFixt
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 400
+
+
+def test_api_server_create_speech_engine_error_response_includes_request_and_stage_id(mocker: MockerFixture):
+    handler = mocker.MagicMock()
+    handler.create_speech = mocker.AsyncMock(
+        side_effect=OmniEngineDeadError(
+            "engine dead",
+            error_stage_id=1,
+        )
+    )
+
+    terminate_mock = mocker.patch.object(api_server_module, "terminate_if_errored")
+
+    app = FastAPI()
+    app.state.args = SimpleNamespace(log_error_stack=False)
+    app.state.openai_serving_speech = handler
+    app.state.engine_client = SimpleNamespace(
+        engine=SimpleNamespace(is_alive=lambda: False),
+        errored=True,
+    )
+    app.state.server = SimpleNamespace()
+    scope = {
+        "type": "http",
+        "app": app,
+        "method": "POST",
+        "path": "/v1/audio/speech",
+        "headers": [],
+        "query_string": b"",
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+        "scheme": "http",
+    }
+    raw_request = Request(scope)
+    raw_request.state.request_metadata = SimpleNamespace(request_id="speech-req-1")
+    request = OpenAICreateSpeechRequest(input="Hello")
+
+    response = asyncio.run(api_server_module.create_speech(request, raw_request))
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 500
+    assert response.body.decode("utf-8") == (
+        '{"error":{"message":"engine dead","type":"InternalServerError","param":null,'
+        '"code":500,"request_id":"speech-req-1","error_stage_id":1}}'
+    )
+    terminate_mock.assert_called_once()
+
+
+def test_omni_engine_error_handler_includes_request_and_stage_id(mocker: MockerFixture):
+    app = FastAPI()
+    app.state.args = SimpleNamespace(log_error_stack=False)
+    app.state.engine_client = SimpleNamespace(
+        engine=SimpleNamespace(is_alive=lambda: False),
+        errored=True,
+    )
+    app.state.server = SimpleNamespace()
+
+    terminate_mock = mocker.patch.object(api_server_module, "terminate_if_errored")
+    api_server_module._register_omni_exception_handlers(app)
+
+    @app.get("/boom")
+    async def boom(request: Request):
+        request.state.request_metadata = SimpleNamespace(request_id="speech-req-1")
+        exc = OmniEngineDeadError("engine dead", error_stage_id=1)
+        raise exc
+
+    response = TestClient(app).get("/boom")
+
+    assert response.status_code == 500
+    assert response.json()["error"]["request_id"] == "speech-req-1"
+    assert response.json()["error"]["error_stage_id"] == 1
+    terminate_mock.assert_called_once()
 
 
 class TestWAVHeaderGeneration:
