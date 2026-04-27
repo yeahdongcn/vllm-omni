@@ -51,7 +51,7 @@ class PackagesEnvChecker:
         if platform.get_device_count() == 0:
             return False
 
-        return platform.has_flash_attn()
+        return platform.has_flash_attn_package()
 
     def get_packages_info(self) -> dict:
         """Get the packages info dictionary."""

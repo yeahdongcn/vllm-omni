@@ -57,7 +57,7 @@ class RocmOmniPlatform(OmniPlatform, RocmPlatform):
         return "vllm_omni.worker.gpu_generation_worker.GPUGenerationWorker"
 
     @classmethod
-    def has_flash_attn(cls) -> bool:
+    def has_flash_attn_package(cls) -> bool:
         from vllm_omni.diffusion.attention.backends.utils.fa import is_flash_attn_installed
 
         return is_flash_attn_installed()

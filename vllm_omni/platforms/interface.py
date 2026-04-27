@@ -98,8 +98,8 @@ class OmniPlatform(Platform):
         raise NotImplementedError
 
     @classmethod
-    def has_flash_attn(cls) -> bool:
-        """Check if a Flash Attention backend is available and usable on this platform."""
+    def has_flash_attn_package(cls) -> bool:
+        """Check if a Flash Attention package is available and usable on this platform."""
         return False
 
     @classmethod
