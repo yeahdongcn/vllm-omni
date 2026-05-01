@@ -8,6 +8,22 @@ Root pytest entrypoint for the vLLM-Omni test suite.
 
 from __future__ import annotations
 
+import enum as _enum
+
+if not hasattr(_enum, "StrEnum"):
+    class _StrEnum(str, _enum.Enum):
+        @staticmethod
+        def _generate_next_value_(name, start, count, last_values):
+            return name.lower()
+
+        def __str__(self) -> str:
+            return str(self.value)
+
+        def __format__(self, format_spec: str) -> str:
+            return format(self.value, format_spec)
+
+    _enum.StrEnum = _StrEnum
+
 pytest_plugins = (
     "tests.helpers.fixtures.env",
     "tests.helpers.fixtures.log",

@@ -4,6 +4,7 @@ Note: Uses importlib to load modules directly, bypassing the vllm_omni
 package __init__ which requires the vllm base package.
 """
 
+import enum
 import importlib.util
 import sys
 from pathlib import Path
@@ -35,10 +36,25 @@ _mm_mod = _load_module(
 )
 
 OutputModality = _om_mod.OutputModality
+OutputModalityNames = _om_mod.OutputModalityNames
 TensorAccumulationStrategy = _om_mod.TensorAccumulationStrategy
 get_accumulation_strategy = _om_mod.get_accumulation_strategy
 MultimodalPayload = _mm_mod.MultimodalPayload
 MultimodalCompletionOutput = _mm_mod.MultimodalCompletionOutput
+
+def test_output_modality_names_strenum_compatibility():
+    """OutputModalityNames should behave like StrEnum on Python 3.10."""
+    assert issubclass(OutputModalityNames, str)
+    assert issubclass(OutputModalityNames, enum.Enum)
+    assert OutputModalityNames.TEXT == "text"
+    assert str(OutputModalityNames.TEXT) == "text"
+    assert f"{OutputModalityNames.IMAGE:>8s}" == "   image"
+
+    class AutoModalityName(_om_mod.StrEnum):
+        IMAGE_NONE = enum.auto()
+
+    assert AutoModalityName.IMAGE_NONE == "image_none"
+    assert str(AutoModalityName.IMAGE_NONE) == "image_none"
 
 
 def test_output_modality_parsing_and_flags():
