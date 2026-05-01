@@ -319,6 +319,19 @@ def test_get_merged_hidden_states(num_tokens_padded, mocker):
     assert req2_merged_states.shape == torch.Size([num_new_toks_req2, HIDDEN_SIZE])
     assert torch.all(req2_merged_states == req2_new_states)
 
+def test_get_merged_multimodal_outputs_handles_none():
+    cache = get_omni_pcache()
+
+    merged_outputs = cache.get_merged_multimodal_states(
+        query_start_loc=[0, 0],
+        input_batch=MockInputBatch(num_computed_tokens_cpu=torch.Tensor([0, 0])),
+        multimodal_outputs=None,
+        num_scheduled_tokens={"req1": 0, "req2": 0},
+    )
+
+    assert merged_outputs is None
+
+
 @pytest.mark.parametrize("num_tokens_padded", [None, 16])
 @pytest.mark.parametrize(
     "feat_dims",

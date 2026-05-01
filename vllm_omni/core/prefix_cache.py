@@ -178,10 +178,13 @@ class OmniTensorPrefixCache:
         self,
         query_start_loc: torch.Tensor,
         input_batch: InputBatch,
-        multimodal_outputs: dict,
+        multimodal_outputs: dict | None,
         num_scheduled_tokens: dict[str, int],
     ):
         """Get the merged multimodal states if hidden state prefix caching is enabled."""
+        if multimodal_outputs is None:
+            return None
+
         combined_multimodal_outputs = {}
         # First get the prefix cached tensors that are present in the mm data
         for mm_key in self.mm_cache_keys:
