@@ -116,14 +116,23 @@ class OmniTensorPrefixCache:
             num_tokens_padded = num_tokens_unpadded
 
         if hidden_states is not None:
-            # Slice to unpadded portion before caching
-            hidden_states = hidden_states[:num_tokens_unpadded]
-            # Ensure that hidden states are on the CPU
-            hidden_states = OmniTensorPrefixCache._coerce_to_cpu_tensor(hidden_states)
-            # View the cache as 2D so that we can treat our slots as row indices
-            flat_cache = self.hidden_states_cache.view(-1, self.hidden_states_cache.shape[-1])
-            flat_cache[unpadded_slot_mapping] = hidden_states
-            logger.debug("Writing to hidden states for %s tokens", num_tokens_unpadded)
+            cache_hidden_size = self.hidden_states_cache.shape[-1]
+            if hidden_states.shape[-1] == cache_hidden_size:
+                # Slice to unpadded portion before caching
+                hidden_states = hidden_states[:num_tokens_unpadded]
+                # Ensure that hidden states are on the CPU
+                hidden_states = OmniTensorPrefixCache._coerce_to_cpu_tensor(hidden_states)
+                # View the cache as 2D so that we can treat our slots as row indices
+                flat_cache = self.hidden_states_cache.view(-1, cache_hidden_size)
+                flat_cache[unpadded_slot_mapping] = hidden_states
+                logger.debug("Writing to hidden states for %s tokens", num_tokens_unpadded)
+            else:
+                logger.warning_once(
+                    "Skipping omni hidden-state prefix cache update: hidden size %s "
+                    "does not match cache hidden size %s",
+                    hidden_states.shape[-1],
+                    cache_hidden_size,
+                )
 
         # Do the same for the stage's cached multimodal outputs
         if multimodal_outputs is not None:
@@ -201,13 +210,51 @@ class OmniTensorPrefixCache:
             )
         return combined_multimodal_outputs
 
-    def get_merged_hidden_states(self, *args, **kwargs) -> dict[str, torch.Tensor]:
+    def get_merged_hidden_states(
+        self,
+        query_start_loc: torch.Tensor,
+        input_batch: InputBatch,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: dict[str, int],
+    ) -> dict[str, torch.Tensor]:
         """Get the merged hidden states."""
+        cache_hidden_size = self.hidden_states_cache.shape[-1]
+        if hidden_states.shape[-1] != cache_hidden_size:
+            logger.warning_once(
+                "Skipping omni hidden-state prefix cache merge: hidden size %s "
+                "does not match cache hidden size %s",
+                hidden_states.shape[-1],
+                cache_hidden_size,
+            )
+            return self._get_current_tensors_by_request(
+                query_start_loc=query_start_loc,
+                input_batch=input_batch,
+                hidden_states=hidden_states,
+                num_scheduled_tokens=num_scheduled_tokens,
+            )
         return self._get_merged_tensors(
-            *args,
-            **kwargs,
+            query_start_loc=query_start_loc,
+            input_batch=input_batch,
+            hidden_states=hidden_states,
+            num_scheduled_tokens=num_scheduled_tokens,
             cache=self.hidden_states_cache,
         )
+
+    def _get_current_tensors_by_request(
+        self,
+        query_start_loc: torch.Tensor,
+        input_batch: InputBatch,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: dict[str, int],
+    ) -> dict[str, torch.Tensor]:
+        hidden_states = OmniTensorPrefixCache._coerce_to_cpu_tensor(hidden_states)
+        current_hidden_states = {}
+        for req_id in input_batch.req_ids:
+            req_idx = input_batch.req_id_to_index[req_id]
+            start = query_start_loc[req_idx]
+            end = start + num_scheduled_tokens[req_id]
+            current_hidden_states[req_id] = hidden_states[start:end]
+        return current_hidden_states
 
     def _get_merged_tensors(
         self,

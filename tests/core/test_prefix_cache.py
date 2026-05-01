@@ -135,6 +135,28 @@ def test_update_no_multimodal():
         assert torch.all(slot_states == new_states)
 
 
+def test_update_skips_mismatched_hidden_states_but_caches_multimodal_outputs():
+    cache = get_omni_pcache()
+
+    num_tokens_unpadded = 8
+    slot_offset = 8
+    slot_mapping = torch.arange(slot_offset, slot_offset + num_tokens_unpadded)
+    hidden_states = torch.rand((num_tokens_unpadded, HIDDEN_SIZE + 1), dtype=DTYPE)
+    multimodal_outputs = {"audio": torch.rand((num_tokens_unpadded, 4), dtype=DTYPE)}
+
+    cache.update_omni_tensor_prefix_cache(
+        hidden_states=hidden_states,
+        multimodal_outputs=multimodal_outputs,
+        num_tokens_unpadded=num_tokens_unpadded,
+        slot_mapping=slot_mapping,
+    )
+
+    assert torch.all(cache.hidden_states_cache == 0)
+    mm_rows = cache.mm_outputs_cache["audio"].view(NUM_BLOCKS * BLOCK_SIZE, 4)
+    for slot_idx, new_states in zip(slot_mapping, multimodal_outputs["audio"]):
+        assert torch.all(mm_rows[slot_idx] == new_states)
+
+
 @pytest.mark.parametrize(
     "feat_dims",
     [
@@ -185,6 +207,55 @@ def fake_get_cached_block_ids(self, req_idx, *args, **kwargs):
         # blocks IDs are 2 & 3 because the block size is 4.
         return torch.tensor([2, 3], dtype=torch.long)
     return torch.tensor([], dtype=torch.long)
+
+
+def test_get_merged_hidden_states_skips_cache_when_hidden_size_mismatches(mocker):
+    cache = get_omni_pcache()
+
+    orig_num_tokens_unpadded = 8
+    slot_offset = 8
+    orig_slot_mapping = torch.arange(slot_offset, slot_offset + orig_num_tokens_unpadded)
+    orig_hidden_states = torch.rand((orig_num_tokens_unpadded, HIDDEN_SIZE), dtype=DTYPE)
+
+    cache.update_omni_tensor_prefix_cache(
+        hidden_states=orig_hidden_states,
+        multimodal_outputs=None,
+        num_tokens_unpadded=orig_num_tokens_unpadded,
+        slot_mapping=orig_slot_mapping,
+    )
+
+    num_new_toks_req1 = 3
+    num_new_toks_req2 = 2
+    cache.add_prefix_cached_new_req_id("req1")
+
+    num_scheduled_tokens = {
+        "req1": num_new_toks_req1,
+        "req2": num_new_toks_req2,
+    }
+    new_hidden_size = HIDDEN_SIZE + 1
+    new_hidden_states = torch.rand(
+        (num_new_toks_req1 + num_new_toks_req2, new_hidden_size),
+        dtype=DTYPE,
+    )
+    req1_new_states = new_hidden_states[:num_new_toks_req1]
+    req2_new_states = new_hidden_states[-num_new_toks_req2:]
+    input_batch = MockInputBatch(
+        num_computed_tokens_cpu=torch.Tensor([orig_num_tokens_unpadded, 0])
+    )
+
+    mocker.patch(
+        "vllm_omni.core.prefix_cache.OmniTensorPrefixCache._get_cached_block_ids",
+        new=fake_get_cached_block_ids,
+    )
+    merged_states = cache.get_merged_hidden_states(
+        query_start_loc=[0, num_new_toks_req1],
+        input_batch=input_batch,
+        hidden_states=new_hidden_states,
+        num_scheduled_tokens=num_scheduled_tokens,
+    )
+
+    assert torch.all(merged_states["req1"] == req1_new_states)
+    assert torch.all(merged_states["req2"] == req2_new_states)
 
 
 @pytest.mark.parametrize("num_tokens_padded", [None, 16])
@@ -247,7 +318,6 @@ def test_get_merged_hidden_states(num_tokens_padded, mocker):
     # Next, ensure that the cache miss case only has the new states
     assert req2_merged_states.shape == torch.Size([num_new_toks_req2, HIDDEN_SIZE])
     assert torch.all(req2_merged_states == req2_new_states)
-
 
 @pytest.mark.parametrize("num_tokens_padded", [None, 16])
 @pytest.mark.parametrize(
