@@ -110,6 +110,10 @@ class MUSAOmniPlatform(OmniPlatform, MUSAPlatformBase):
         return False
 
     @classmethod
+    def supports_fp8(cls) -> bool:
+        return cls.has_device_capability((3, 1))
+
+    @classmethod
     def get_torch_device(cls, local_rank: int | None = None) -> torch.device:
         """Get the torch device for MUSA platform.
 

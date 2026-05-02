@@ -364,3 +364,24 @@ def test_multi_component_model_routing():
                 assert resolved.get_name() == "fp8"
             elif name.startswith("vae"):
                 assert resolved is None, f"{name} should NOT be quantized"
+
+
+def test_musa_omni_platform_fp8_gate():
+    from unittest.mock import patch
+
+    from vllm.platforms.interface import DeviceCapability
+    from vllm_omni.platforms.musa.platform import MUSAOmniPlatform
+
+    with patch.object(
+        MUSAOmniPlatform,
+        "get_device_capability",
+        return_value=DeviceCapability(3, 1),
+    ):
+        assert MUSAOmniPlatform.supports_fp8() is True
+
+    with patch.object(
+        MUSAOmniPlatform,
+        "get_device_capability",
+        return_value=DeviceCapability(3, 0),
+    ):
+        assert MUSAOmniPlatform.supports_fp8() is False
