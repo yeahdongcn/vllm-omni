@@ -258,3 +258,74 @@ def test_qwen_edit_validator_excludes_image_placeholders_from_budget(pipeline_cl
 )
 def test_forward_max_sequence_length_default_is_1024(pipeline_class: type):
     assert inspect.signature(pipeline_class.forward).parameters["max_sequence_length"].default == 1024
+
+
+class _DynamicShiftScheduler:
+    def __init__(self):
+        self.config = {
+            "use_dynamic_shifting": True,
+            "base_image_seq_len": 256,
+            "max_image_seq_len": 4096,
+            "base_shift": 0.5,
+            "max_shift": 1.15,
+        }
+        self.sigmas = torch.empty(0)
+        self.timesteps = torch.empty(0)
+        self.received_sigmas = None
+
+    def set_timesteps(self, sigmas, device=None, mu=None):
+        self.received_sigmas = sigmas
+        self.sigmas = torch.as_tensor(sigmas, dtype=torch.float32)
+        self.timesteps = torch.arange(len(sigmas), dtype=torch.float32)
+
+
+@pytest.mark.parametrize(
+    "pipeline_cls",
+    [
+        QwenImagePipeline,
+        QwenImageEditPipeline,
+        QwenImageEditPlusPipeline,
+    ],
+)
+def test_prepare_timesteps_guards_single_step_dynamic_shift_schedule(pipeline_cls):
+    pipeline = object.__new__(pipeline_cls)
+    nn.Module.__init__(pipeline)
+    pipeline.scheduler = _DynamicShiftScheduler()
+
+    timesteps, num_inference_steps = pipeline.prepare_timesteps(
+        num_inference_steps=1,
+        sigmas=None,
+        image_seq_len=256,
+    )
+
+    assert num_inference_steps == 1
+    assert torch.equal(timesteps, torch.tensor([0.0]))
+    assert pipeline.scheduler.received_sigmas.shape == (2,)
+    assert pipeline.scheduler.received_sigmas.tolist() == [1.0, 0.5]
+    assert torch.equal(pipeline.scheduler.timesteps, torch.tensor([0.0]))
+    assert torch.equal(pipeline.scheduler.sigmas, torch.tensor([1.0, 0.5]))
+
+
+@pytest.mark.parametrize(
+    "pipeline_cls",
+    [
+        QwenImagePipeline,
+        QwenImageEditPipeline,
+        QwenImageEditPlusPipeline,
+    ],
+)
+def test_prepare_timesteps_accepts_tensor_sigmas_for_single_step_guard(pipeline_cls):
+    pipeline = object.__new__(pipeline_cls)
+    nn.Module.__init__(pipeline)
+    pipeline.scheduler = _DynamicShiftScheduler()
+
+    timesteps, num_inference_steps = pipeline.prepare_timesteps(
+        num_inference_steps=1,
+        sigmas=torch.tensor([1.0]),
+        image_seq_len=256,
+    )
+
+    assert num_inference_steps == 1
+    assert torch.equal(timesteps, torch.tensor([0.0]))
+    assert pipeline.scheduler.received_sigmas.shape == (2,)
+    assert pipeline.scheduler.received_sigmas.tolist() == [1.0, 0.5]

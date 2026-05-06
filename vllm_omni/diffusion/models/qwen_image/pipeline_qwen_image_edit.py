@@ -616,6 +616,19 @@ class QwenImageEditPipeline(nn.Module, SupportImageInput, QwenImageCFGParallelMi
 
     def prepare_timesteps(self, num_inference_steps, sigmas, image_seq_len):
         sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
+        if torch.is_tensor(sigmas):
+            sigmas_array = sigmas.detach().float().cpu().numpy().reshape(-1)
+        else:
+            sigmas_array = np.asarray(sigmas, dtype=np.float32).reshape(-1)
+        use_single_step_schedule_guard = (
+            num_inference_steps == 1
+            and sigmas_array.size == 1
+            and self.scheduler.config.get("use_dynamic_shifting", False)
+        )
+        scheduler_sigmas = sigmas
+        if use_single_step_schedule_guard:
+            first_sigma = float(sigmas_array[0])
+            scheduler_sigmas = np.array([first_sigma, first_sigma / 2], dtype=np.float32)
         mu = calculate_shift(
             image_seq_len,
             self.scheduler.config.get("base_image_seq_len", 256),
@@ -626,9 +639,14 @@ class QwenImageEditPipeline(nn.Module, SupportImageInput, QwenImageCFGParallelMi
         timesteps, num_inference_steps = retrieve_timesteps(
             self.scheduler,
             num_inference_steps,
-            sigmas=sigmas,
+            sigmas=scheduler_sigmas,
             mu=mu,
         )
+        if use_single_step_schedule_guard:
+            timesteps = timesteps[:1]
+            self.scheduler.timesteps = timesteps
+            self.scheduler.sigmas = torch.cat((self.scheduler.sigmas[:1], self.scheduler.sigmas[-1:]))
+            num_inference_steps = 1
         return timesteps, num_inference_steps
 
     @property

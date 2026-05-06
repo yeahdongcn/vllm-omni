@@ -163,8 +163,10 @@ class CFGParallelMixin(metaclass=ABCMeta):
         """
         cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
         noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-        noise_pred = comb_pred * (cond_norm / noise_norm)
-        return noise_pred
+        min_norm = torch.finfo(noise_norm.dtype).tiny
+        safe_noise_norm = noise_norm.clamp_min(min_norm)
+        noise_pred = comb_pred * (cond_norm / safe_noise_norm)
+        return torch.where(noise_norm == 0, comb_pred, noise_pred)
 
     def combine_cfg_noise(
         self,

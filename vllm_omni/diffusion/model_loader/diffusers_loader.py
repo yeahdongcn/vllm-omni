@@ -16,6 +16,14 @@ from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_processing,
+    record_metadata_for_reloading,
+)
+from vllm.model_executor.model_loader.reload.layerwise import (
+    get_layerwise_info,
+    initialize_online_processing,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     download_gguf,
     download_safetensors_index_file_from_hf,
@@ -49,6 +57,25 @@ def _natural_sort_key(filepath: str) -> list:
 
 MODEL_INDEX = "model_index.json"
 DIFFUSION_MODEL_WEIGHTS_INDEX = "diffusion_pytorch_model.safetensors.index.json"
+
+
+def _has_online_quant(model: nn.Module) -> bool:
+    return any(
+        getattr(getattr(module, "quant_method", None), "uses_meta_device", False)
+        for module in model.modules()
+    )
+
+
+def _prepare_online_quant_reloading(model: nn.Module, device: torch.device) -> bool:
+    if not _has_online_quant(model):
+        return False
+    record_metadata_for_reloading(model)
+    for module in model.modules():
+        get_layerwise_info(module).restore_device = device
+        quant_method = getattr(module, "quant_method", None)
+        if getattr(quant_method, "uses_meta_device", False):
+            initialize_online_processing(module)
+    return True
 
 
 class DiffusersPipelineLoader:
@@ -266,13 +293,15 @@ class DiffusersPipelineLoader:
         if load_format is None:
             load_format = "default"
 
-        # CPU offload + FP8: load weights on device for FP8 quantization
-        if load_device == "cpu" and od_config.quantization_config is not None:
-            load_device = device.type
-            logger.info(f"Quantization enabled with CPU offload, using {load_device} for weight loading")
-
         target_device = torch.device(load_device)
+        if load_device == "cpu" and od_config.quantization_config is not None and device is not None:
+            target_device = torch.device(device)
+            logger.info(
+                "Quantization enabled with CPU offload, using %s for weight loading",
+                target_device,
+            )
         with set_default_torch_dtype(od_config.dtype):
+            has_online_quant = False
             if od_config.parallel_config.use_hsdp:
                 model = self._load_model_with_hsdp(
                     od_config, load_format=load_format, custom_pipeline_name=custom_pipeline_name
@@ -289,6 +318,7 @@ class DiffusersPipelineLoader:
                     else:
                         # 'dummy' format should not call this function at all
                         raise ValueError(f"Unknown load_format: {load_format}")
+                    has_online_quant = _prepare_online_quant_reloading(model, target_device)
                 logger.debug("Loading weights on %s ...", load_device)
                 if load_format == "diffusers":
                     # DiffusersAdapterPipeline.load_weights() calls
@@ -300,14 +330,20 @@ class DiffusersPipelineLoader:
                 else:
                     # Quantization does not happen in `load_weights` but after it
                     self.load_weights(model)
+                if has_online_quant:
+                    finalize_layerwise_processing(model, od_config)
 
             # Process weights after loading for quantization (e.g., FP8 online quantization)
             # This is needed for vLLM's quantization methods that need to transform weights
-            self._process_weights_after_loading(model, target_device)
+            self._process_weights_after_loading(
+                model, target_device, skip_online_quant=has_online_quant
+            )
 
         return model.eval()
 
-    def _process_weights_after_loading(self, model: nn.Module, target_device: torch.device) -> None:
+    def _process_weights_after_loading(
+        self, model: nn.Module, target_device: torch.device, *, skip_online_quant: bool = False
+    ) -> None:
         """Process weights after loading for quantization methods.
 
         This handles vLLM's quantization methods that need to process weights
@@ -316,6 +352,9 @@ class DiffusersPipelineLoader:
         for _, module in model.named_modules():
             quant_method = getattr(module, "quant_method", None)
             if isinstance(quant_method, QuantizeMethodBase):
+                if skip_online_quant and getattr(quant_method, "uses_meta_device", False):
+                    continue
+
                 # Move module to target device for processing if needed
                 module_device = next(module.parameters(), None)
                 if module_device is not None:
@@ -557,6 +596,13 @@ class DiffusersPipelineLoader:
         elif load_format == "custom_pipeline":
             model_cls = resolve_obj_by_qualname(custom_pipeline_name)
             model = model_cls(od_config=od_config)
+        else:
+            raise ValueError(f"Unknown load_format: {load_format}")
+        if _has_online_quant(model):
+            raise ValueError(
+                "HSDP does not support online/meta-device quantization; "
+                "disable HSDP or use a non-online quantization path."
+            )
         self.load_weights(model)
 
         # Collect all transformers to shard (some models have transformer_2 for MoE)

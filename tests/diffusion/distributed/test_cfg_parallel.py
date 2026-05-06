@@ -136,6 +136,28 @@ class TestCFGPipeline(CFGParallelMixin):
             torch.nn.init.normal_(param, mean=0.0, std=0.02)
 
 
+def test_cfg_normalize_function_handles_zero_combined_norm():
+    pipeline = TestCFGPipeline(in_channels=1, hidden_dim=8, seed=42)
+    positive = torch.tensor([[[1.0, -2.0, 3.0, -4.0]]])
+    combined = torch.zeros_like(positive)
+
+    normalized = pipeline.cfg_normalize_function(positive, combined)
+
+    assert torch.isfinite(normalized).all()
+    assert torch.equal(normalized, combined)
+
+
+def test_cfg_normalize_function_preserves_tiny_nonzero_norm():
+    pipeline = TestCFGPipeline(in_channels=1, hidden_dim=8, seed=42)
+    positive = torch.tensor([[[3.0, 4.0]]])
+    combined = torch.tensor([[[1e-12, 0.0]]])
+
+    normalized = pipeline.cfg_normalize_function(positive, combined)
+
+    assert torch.isfinite(normalized).all()
+    assert torch.allclose(torch.norm(normalized, dim=-1), torch.norm(positive, dim=-1))
+
+
 def _test_cfg_parallel_worker(
     local_rank: int,
     world_size: int,
