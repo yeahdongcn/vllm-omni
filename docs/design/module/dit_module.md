@@ -749,7 +749,7 @@ class TeaCacheBackend(CacheBackend):
 
 **2. Cache-DiT Backend**
 
-**Location**: `vllm_omni/diffusion/cache/cache_dit_backend.py`
+**Location**: `vllm_omni/diffusion/cache/cachedit/`
 
 ```python
 class CacheDiTBackend(CacheBackend):
