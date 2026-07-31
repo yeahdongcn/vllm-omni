@@ -88,13 +88,16 @@ class _RotaryEmbedding(nn.Module):
 
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # position_ids: [batch, seq_len]
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-        position_ids_expanded = position_ids[:, None, :].float()
-
         # Force float32 (matching HF)
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            if current_omni_platform.is_musa():
+                # MUSA muDNN rejects the expanded matmul with ldb=0.
+                freqs = position_ids.float().unsqueeze(-1) * self.inv_freq.float().view(1, 1, -1)
+            else:
+                inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+                position_ids_expanded = position_ids[:, None, :].float()
+                freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
