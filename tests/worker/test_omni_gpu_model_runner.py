@@ -3,11 +3,64 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.v1.cudagraph_dispatcher import CUDAGraphMode
 
-from vllm_omni.worker.gpu_model_runner import OmniGPUModelRunner, _filter_mrope_kwargs_for_model
+from vllm_omni.worker.gpu_model_runner import (
+    OmniGPUModelRunner,
+    _filter_mrope_kwargs_for_model,
+)
 from vllm_omni.worker.omni_connector_model_runner_mixin import OmniConnectorModelRunnerMixin
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
+
+def _runner_for_talker_graph_init() -> OmniGPUModelRunner:
+    runner = object.__new__(OmniGPUModelRunner)
+    runner.model = SimpleNamespace(
+        talker=object(),
+        talker_mtp=object(),
+        talker_mtp_uses_torch_multinomial=True,
+    )
+    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4))
+    runner.compilation_config = SimpleNamespace(
+        cudagraph_mode=CUDAGraphMode.FULL,
+        max_cudagraph_capture_size=1,
+    )
+    runner.vllm_config = object()
+    runner.max_num_reqs = 1
+    runner.dtype = torch.float32
+    runner._make_buffer = lambda *args, **kwargs: SimpleNamespace(args=args, kwargs=kwargs)
+    return runner
+
+
+def test_talker_mtp_skips_graph_when_platform_cannot_capture_multinomial(monkeypatch):
+    runner = _runner_for_talker_graph_init()
+    talker_mtp = runner.model.talker_mtp
+    monkeypatch.setattr(
+        "vllm_omni.worker.gpu_model_runner.current_omni_platform.supports_torch_multinomial_in_cudagraph",
+        lambda: False,
+    )
+
+    OmniGPUModelRunner._init_talker_mtp(runner)
+
+    assert runner.talker_mtp is talker_mtp
+
+
+def test_talker_mtp_uses_graph_when_platform_can_capture_multinomial(monkeypatch):
+    runner = _runner_for_talker_graph_init()
+    wrapped = object()
+    monkeypatch.setattr(
+        "vllm_omni.worker.gpu_model_runner.current_omni_platform.supports_torch_multinomial_in_cudagraph",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "vllm_omni.worker.gpu_model_runner.current_omni_platform.get_graph_wrapper_cls",
+        lambda: lambda *args, **kwargs: wrapped,
+    )
+
+    OmniGPUModelRunner._init_talker_mtp(runner)
+
+    assert runner.talker_mtp is wrapped
 
 
 class DummyBuffer:

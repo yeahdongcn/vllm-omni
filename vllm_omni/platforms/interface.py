@@ -113,6 +113,11 @@ class OmniPlatform(Platform):
         raise NotImplementedError
 
     @classmethod
+    def supports_torch_multinomial_in_cudagraph(cls) -> bool:
+        """Whether torch.multinomial can execute during graph capture."""
+        return True
+
+    @classmethod
     def has_flash_attn_package(cls) -> bool:
         """Check if a Flash Attention package is available and usable on this platform."""
         return False

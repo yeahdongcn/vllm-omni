@@ -105,6 +105,10 @@ class MUSAOmniPlatform(OmniPlatform, MUSAPlatformBase):
         return True
 
     @classmethod
+    def supports_torch_multinomial_in_cudagraph(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_float64(cls) -> bool:
         """MUSA does not support float64 yet."""
         return False

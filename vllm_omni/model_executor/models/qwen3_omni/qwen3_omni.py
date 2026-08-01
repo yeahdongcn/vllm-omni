@@ -100,6 +100,7 @@ class Qwen3OmniMoeForConditionalGeneration(
     """
 
     realtime_max_tokens = 64
+    talker_mtp_uses_torch_multinomial = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
