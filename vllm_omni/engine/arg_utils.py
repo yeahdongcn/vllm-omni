@@ -1,4 +1,5 @@
 import argparse
+import copy
 import json
 import os
 import tempfile
@@ -12,6 +13,7 @@ from vllm_omni.config import OmniModelConfig
 from vllm_omni.engine.output_modality import OutputModality
 from vllm_omni.platforms import current_omni_platform
 from vllm_omni.plugins import load_omni_general_plugins
+from vllm_omni.quantization.component_config import PRE_QUANTIZED_METHODS
 
 logger = init_logger(__name__)
 
@@ -31,6 +33,53 @@ _TOKENIZER_SUBFOLDER_MAP: dict[str, str] = {
     "CosyVoice3Model": "CosyVoice-BlankEN",
     "GLMTTSForConditionalGeneration": "vq32k-phoneme-tokenizer",
 }
+
+
+def _stage_hf_config(
+    hf_config: Any,
+    *,
+    model_stage: str | None,
+    hf_config_name: str | None,
+) -> Any:
+    stage_config_name = f"{model_stage}_config" if model_stage else None
+    stage_config = getattr(hf_config, stage_config_name, None) if stage_config_name else None
+    if stage_config is None and hf_config_name is not None:
+        stage_config = getattr(hf_config, hf_config_name, None)
+    return stage_config
+
+
+def _scope_prequantized_model_config(
+    model_config: Any,
+    *,
+    model_stage: str | None,
+    hf_config_name: str | None,
+    explicit_quantization: str | None,
+) -> Any:
+    """Remove auto-detected parent quantization from an unquantized stage."""
+    if explicit_quantization is not None or model_config.quantization not in PRE_QUANTIZED_METHODS:
+        return model_config
+
+    stage_config = _stage_hf_config(
+        model_config.hf_config,
+        model_stage=model_stage,
+        hf_config_name=hf_config_name,
+    )
+    if stage_config is None:
+        return model_config
+
+    text_config = getattr(stage_config, "text_config", None)
+    stage_quantization = getattr(stage_config, "quantization_config", None)
+    if stage_quantization is None and text_config is not None:
+        stage_quantization = getattr(text_config, "quantization_config", None)
+    if stage_quantization is not None:
+        return model_config
+
+    scoped_config = copy.deepcopy(model_config)
+    scoped_config.quantization = None
+    if hasattr(scoped_config.hf_config, "quantization_config"):
+        scoped_config.hf_config.quantization_config = None
+    scoped_config.model_arch_config = scoped_config.get_model_arch_config()
+    return scoped_config
 
 
 def _register_omni_hf_configs() -> None:
@@ -335,6 +384,13 @@ class OmniEngineArgs(EngineArgs):
 
                 shutil.rmtree(self._temp_config_dir, ignore_errors=True)
                 del self._temp_config_dir
+
+        model_config = _scope_prequantized_model_config(
+            model_config,
+            model_stage=self.model_stage,
+            hf_config_name=self.hf_config_name,
+            explicit_quantization=self.quantization,
+        )
 
         omni_config = OmniModelConfig.from_vllm_model_config(
             model_config=model_config,
