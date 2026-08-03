@@ -44,7 +44,8 @@ class ReferenceImage:
 class ReferenceVideo:
     """Reference video frames for video-conditioned generation."""
 
-    data: list[Image.Image]
+    data: list[Image.Image] | list[str]
+    cleanup_paths: tuple[str, ...] = ()
 
 
 @dataclass

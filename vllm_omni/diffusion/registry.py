@@ -105,6 +105,10 @@ _DIFFUSION_MODELS = {
         "ltx2",
         "pipeline_ltx2_3_image2video",
         "LTX23ImageToVideoPipeline",
+    "MiniMaxH3Pipeline": (
+        "minimax_h3",
+        "pipeline_minimax_h3",
+        "MiniMaxH3Pipeline",
     ),
     "StableAudioPipeline": (
         "stable_audio",
@@ -498,6 +502,7 @@ _DIFFUSION_POST_PROCESS_FUNCS = {
     "LTX2I2VDMD2Pipeline": "get_ltx2_post_process_func",
     "LTX23Pipeline": "get_ltx2_post_process_func",
     "LTX23ImageToVideoPipeline": "get_ltx2_post_process_func",
+    "MiniMaxH3Pipeline": "get_minimax_h3_post_process_func",
     "StableAudioPipeline": "get_stable_audio_post_process_func",
     "SoulXSingerPipeline": "get_soulxsinger_post_process_func",
     "SoulXSingerSVCPipeline": "get_soulxsinger_post_process_func",

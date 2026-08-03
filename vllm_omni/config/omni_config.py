@@ -111,6 +111,7 @@ class _ParallelConfigEngineOverrides(TypedDict, total=False):
     ulysses_mode: str
     cfg_parallel_size: int
     vae_patch_parallel_size: int
+    text_encoder_tp_size: int
     use_hsdp: bool
     mask_sp_padding: bool
     hsdp_shard_size: int
@@ -355,6 +356,7 @@ class OmniStageDiffusionParallelConfig(OmniStageParallelConfig):
     ulysses_mode: str = "strict"
     cfg_parallel_size: int = Field(default=1, ge=1, le=3)
     vae_patch_parallel_size: int = Field(default=1, ge=1)
+    text_encoder_tp_size: int = Field(default=1, ge=1)
     vae_parallel_mode: str = "tile"
     use_hsdp: bool = False
     mask_sp_padding: bool = False

@@ -47,6 +47,10 @@ recipes/
 | [`LTX/LTX-2.md`](./LTX/LTX-2.md) | Text-to-video and image-to-video serving | 1x H200 141GB |
 | [`LTX/LTX-2.3.md`](./LTX/LTX-2.3.md) | Text-to-video with audio generation (22B) | 1x GPU (96GB VRAM) |
 | [`MammothModa2/MammothModa2-Preview.md`](./MammothModa2/MammothModa2-Preview.md) | Text-to-image with the shared offline image example (AR → DiT) | 1x L40S 48GB / 1x ≥40GB GPU |
+| [`MiniMaxAI/MiniMax-H3.md`](./MiniMaxAI/MiniMax-H3.md) | T2VA, FL2VA, image+audio Ref2VA, and multi-video Ref2VA serving | 1x GPU with CPU offload / 4x B300 |
+| [`krea/Krea-2.md`](./krea/Krea-2.md) | Text-to-image (Turbo + Raw), offline + online, with LoRA | 1x H100 80GB |
+| [`LTX/LTX-2.md`](./LTX/LTX-2.md) | LTX-2/LTX-2.3 text-to-video and image-to-video with synchronized audio | H200 141GB / 96GB-class GPU |
+| [`MammothModa2/MammothModa2.md`](./MammothModa2/MammothModa2.md) | Preview and Dev text-to-image (AR → DiT); Dev text/image understanding | Preview: 1x L40S 48GB / 1x ≥40GB GPU; Dev: 1x NVIDIA GPU with sufficient cache headroom |
 | [`mistralai/Voxtral-TTS.md`](./mistralai/Voxtral-TTS.md) | Online serving for TTS | 1x RTX 4090 24GB |
 | [`cosmos3/Cosmos3-Nano.md`](./cosmos3/Cosmos3-Nano.md) | Text-to-image, text-to-video, image-to-video, video-to-video generation, text to video with sound, action policy | 1x H200 141GB / B300 |
 | [`cosmos3/Cosmos3-Super.md`](./cosmos3/Cosmos3-Super.md) | 64B T2I / T2V / I2V / V2V generation (+ optional audio) / Action policy | 8x H200/H100/A100 / 2x H200 / B300 |

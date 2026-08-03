@@ -26,6 +26,21 @@ _DIFFUSION_MODEL_METADATA: dict[str, DiffusionModelMetadata] = {
         supports_multimodal_inputs=True,
         max_multimodal_image_inputs=HUNYUAN_IMAGE3_MAX_INPUT_IMAGES,
     ),
+    # Shared by the Base (text-to-image) and Edit (TI2I) checkpoints, which use
+    # the same ``BooguImagePipeline`` class. Text-to-image requests simply carry
+    # no reference image.
+    "BooguImagePipeline": DiffusionModelMetadata(
+        supports_multimodal_inputs=True,
+        max_multimodal_image_inputs=BOOGU_IMAGE_MAX_INPUT_IMAGES,
+    ),
+    "MiniMaxH3Pipeline": DiffusionModelMetadata(
+        supports_multimodal_inputs=True,
+        max_multimodal_image_inputs=1,
+    ),
+    "WanPipeline": DiffusionModelMetadata(attention_mask_free=True),
+    "WanImageToVideoPipeline": DiffusionModelMetadata(attention_mask_free=True),
+    "WanVACEPipeline": DiffusionModelMetadata(attention_mask_free=True),
+    "WanS2VPipeline": DiffusionModelMetadata(attention_mask_free=True),
 }
 
 
