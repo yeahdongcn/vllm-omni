@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import importlib
 import json
-from contextlib import AbstractContextManager
+from collections.abc import Generator
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,27 @@ from .packed_tokens import minimax_h3_patchify_video_latent
 MINIMAX_H3_KEYFRAME_ENCODE_SEED = 42
 MINIMAX_H3_AUDIO_SAMPLE_RATE = 32000
 MINIMAX_H3_AUDIO_CHANNELS = 2
+# Preserve the existing CUDA path and enable only hardware-validated MUSA.
+# Other accelerators keep the CPU-only fallback until their RNG semantics are
+# validated on hardware.
+_SUPPORTED_DEVICE_RNG_TYPES = {"cuda", "musa"}
+
+
+@contextmanager
+def _seeded_device_rng(
+    device: torch.device,
+    *,
+    seed: int,
+) -> Generator[None, None, None]:
+    devices = [device] if device.type in _SUPPORTED_DEVICE_RNG_TYPES else []
+    fork_kwargs = {} if not devices else {"device_type": device.type}
+    with torch.random.fork_rng(devices=devices, **fork_kwargs):
+        torch.default_generator.manual_seed(seed)
+        if devices:
+            device_module = getattr(torch, device.type)
+            with device_module.device(device):
+                device_module.manual_seed(seed)
+        yield
 
 
 def _load_component_config(component_path: str) -> dict[str, Any]:
@@ -166,13 +188,11 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
         previous_dtype = parameter.dtype
         if previous_dtype != torch.float32:
             self.to(torch.float32)
-        devices = [parameter.device] if parameter.device.type == "cuda" else []
         try:
-            with torch.random.fork_rng(devices=devices):
-                torch.default_generator.manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED)
-                for device in devices:
-                    with torch.cuda.device(device):
-                        torch.cuda.manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED)
+            with _seeded_device_rng(
+                parameter.device,
+                seed=MINIMAX_H3_KEYFRAME_ENCODE_SEED,
+            ):
                 latent = self.model.encode_images(
                     image,
                     use_fp16_latent=True,
@@ -210,13 +230,11 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
         previous_dtype = parameter.dtype
         if previous_dtype != torch.float32:
             self.to(torch.float32)
-        devices = [parameter.device] if parameter.device.type == "cuda" else []
         try:
-            with torch.random.fork_rng(devices=devices):
-                torch.default_generator.manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED)
-                for device in devices:
-                    with torch.cuda.device(device):
-                        torch.cuda.manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED)
+            with _seeded_device_rng(
+                parameter.device,
+                seed=MINIMAX_H3_KEYFRAME_ENCODE_SEED,
+            ):
                 latent = self.model.encode_videos(
                     frames,
                     use_fp16_latent=True,
