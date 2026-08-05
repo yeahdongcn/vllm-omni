@@ -105,6 +105,7 @@ _DIFFUSION_MODELS = {
         "ltx2",
         "pipeline_ltx2_3_image2video",
         "LTX23ImageToVideoPipeline",
+    ),
     "MiniMaxH3Pipeline": (
         "minimax_h3",
         "pipeline_minimax_h3",
