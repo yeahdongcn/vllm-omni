@@ -168,6 +168,7 @@ The following tables show which models support each feature:
 | **Cosmos3**                  |     ❌     |     ✅      |           ✅           |       ✅        |         ✅         |         ❌         |   ✅    |             ✅             |  ✅ (encode/decode)   |       ✅        |        ❌         |
 | **LongCat-Video-Avatar-1.5** |     ❌     |     ❌      |           ❌           |       ❌        |         ❌         |         ❌         |   ❌    |             ❌             |          ❌           |       ❌        |        ❌         |
 | **MiniMax-H3**               | ✅ (FL2VA) |     ✅      |           ✅           |       ❌        |       ✅ (DiT/TE)  |         ❌         |   ✅    |             ✅             |       ✅ (tile)       |      ✅ (DiT)      |        ❌         |
+| **MAGI-2 Preview**           |     ❌     |     ❌      |      ✅ (Ulysses)       |       ❌        |       ❌ (TP=1)    |         ❌         |   ❌    |      ✅ (DLO no-AG)          |          ❌           |       ❌        |        ❌         |
 | **SANA-WM**                  |     ❌     |     ❌      |          ❌<sup>5</sup> |       ✅        |         ✅         |         ❌         |   ❌    |             ❌             |          ❌           |       ❌        |        ❌         |
 
 > Notes:
@@ -176,6 +177,10 @@ The following tables show which models support each feature:
 >    the token sequence in isolation. Doing so would need a distributed scan or
 >    an all-gather before every GDN block. The remaining ❌ columns are simply
 >    unvalidated on this model, not known-broken.
+
+MAGI-2 Preview uses the native vLLM-Omni pipeline with tensor parallel size 1 and a Ulysses group that spans the
+complete 4- or 8-worker world. Distributed layerwise offload is supported only with rank-local weight streaming
+(`--dlo-no-use-allgather`); DLO AllGather is incompatible with the model's overlapping MoE-head partition.
 
 > **Step execution note:** Helios supports single-request step execution only;
 > use `max_num_seqs=1`.

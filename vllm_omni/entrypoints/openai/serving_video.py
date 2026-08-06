@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -82,7 +83,7 @@ class VideoGenerationArtifacts:
     audios: list[DiffusionPayloadValue | None]
     actions: list[VideoAction | None]
     audio_sample_rate: int
-    output_fps: int
+    output_fps: float
     stage_durations: dict[str, float]
     peak_memory_mb: float
 
@@ -207,11 +208,14 @@ class OmniOpenAIServingVideo:
         provided_fields = request.model_fields_set
         fps_provided = self._request_fps_provided(request)
         vp = request.resolve_video_params()
+        od_config = self._resolve_diffusion_od_config()
+        model_class_name = getattr(od_config, "model_class_name", None) if od_config is not None else None
         if (
             input_image is not None
             and vp.width is not None
             and vp.height is not None
             and not self.preserves_reference_image_size
+            and model_class_name != "Magi2Pipeline"
         ):
             target_size = (vp.width, vp.height)
             image_items = input_image if isinstance(input_image, list) else [input_image]
@@ -747,15 +751,15 @@ class OmniOpenAIServingVideo:
             return None
 
     @staticmethod
-    def _resolve_fps(result: object) -> int | None:
+    def _resolve_fps(result: object) -> float | None:
         """Extract fps from multimodal_output if the model reported it."""
         multimodal_output = getattr(result, "multimodal_output", None)
         if isinstance(multimodal_output, Mapping):
             fps = multimodal_output.get("fps")
             if fps is not None:
                 try:
-                    fps_val = fps.item() if hasattr(fps, "item") else int(fps)
-                    if fps_val > 0:
+                    fps_val = float(fps.item() if hasattr(fps, "item") else fps)
+                    if math.isfinite(fps_val) and fps_val > 0:
                         return fps_val
                 except (TypeError, ValueError):
                     pass
@@ -767,8 +771,8 @@ class OmniOpenAIServingVideo:
                 fps = mm.get("fps")
                 if fps is not None:
                     try:
-                        fps_val = fps.item() if hasattr(fps, "item") else int(fps)
-                        if fps_val > 0:
+                        fps_val = float(fps.item() if hasattr(fps, "item") else fps)
+                        if math.isfinite(fps_val) and fps_val > 0:
                             return fps_val
                     except (TypeError, ValueError):
                         pass
@@ -778,8 +782,8 @@ class OmniOpenAIServingVideo:
                 fps = mm.get("fps")
                 if fps is not None:
                     try:
-                        fps_val = fps.item() if hasattr(fps, "item") else int(fps)
-                        if fps_val > 0:
+                    fps_val = float(fps.item() if hasattr(fps, "item") else fps)
+                    if math.isfinite(fps_val) and fps_val > 0:
                             return fps_val
                     except (TypeError, ValueError):
                         pass

@@ -3,7 +3,7 @@
 
 """
 Image-to-Video generation example using Wan2.2 I2V/TI2V models, LTX2/LTX-2.3,
-HunyuanVideo-1.5, SANA-Video, Cosmos3, or Wan2.1 VACE.
+HunyuanVideo-1.5, SANA-Video, Cosmos3, MAGI-2, or Wan2.1 VACE.
 
 Supports:
 - Wan2.2-I2V-A14B-Diffusers: MoE model with CLIP image encoder
@@ -118,19 +118,28 @@ def _validate_video_output_type(output_type: str) -> None:
         )
 
 
+def _distributed_layerwise_offload_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    """Return the distributed layerwise offload options forwarded to Omni."""
+    return {
+        "enable_distributed_layerwise_offload": args.enable_distributed_layerwise_offload,
+        "dlo_use_allgather": args.dlo_use_allgather,
+        "dlo_resident_layers": args.dlo_resident_layers,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Generate a video from one or more images "
-            "(Wan2.2, LTX2/LTX-2.3, HunyuanVideo-1.5, SANA-Video, Cosmos3, or Wan2.1 VACE)."
+            "(Wan2.2, LTX2/LTX-2.3, HunyuanVideo-1.5, SANA-Video, Cosmos3, MAGI-2, or Wan2.1 VACE)."
         )
     )
     parser.add_argument(
         "--model",
         default="Wan-AI/Wan2.2-I2V-A14B-Diffusers",
         help=(
-            "Diffusers I2V model ID or local path "
-            "(Wan2.2, LTX2/LTX-2.3, HunyuanVideo-1.5, SANA-Video, Cosmos3, or Wan2.1 VACE)."
+            "I2V model ID or local path "
+            "(Wan2.2, LTX2/LTX-2.3, HunyuanVideo-1.5, SANA-Video, Cosmos3, MAGI-2, or Wan2.1 VACE)."
         ),
     )
     parser.add_argument(
@@ -209,7 +218,7 @@ def parse_args() -> argparse.Namespace:
         help="Diffusion KV-cache quantization skip-layer selector, e.g. '0,1,4-8'.",
     )
     parser.add_argument("--output", type=str, default="i2v_output.mp4", help="Path to save the video (mp4).")
-    parser.add_argument("--fps", type=int, default=None, help="Frames per second for the output video.")
+    parser.add_argument("--fps", type=float, default=None, help="Frames per second for the output video.")
     parser.add_argument(
         "--vae-use-slicing",
         action="store_true",
@@ -229,6 +238,30 @@ def parse_args() -> argparse.Namespace:
         "--enable-layerwise-offload",
         action="store_true",
         help="Enable layerwise (blockwise) offloading on DiT modules.",
+    )
+    parser.add_argument(
+        "--enable-distributed-layerwise-offload",
+        action="store_true",
+        help="Enable distributed layerwise offloading with overlapped host-to-device weight streaming.",
+    )
+    parser.add_argument(
+        "--dlo-use-allgather",
+        dest="dlo_use_allgather",
+        action="store_true",
+        default=True,
+        help="Use shard + AllGather weight reconstruction for distributed layerwise offload (default: enabled).",
+    )
+    parser.add_argument(
+        "--dlo-no-use-allgather",
+        dest="dlo_use_allgather",
+        action="store_false",
+        help="Stream standard-loader rank-local weights without DLO sharding or AllGather.",
+    )
+    parser.add_argument(
+        "--dlo-resident-layers",
+        type=int,
+        default=0,
+        help="Number of leading main-DiT blocks to keep device-resident during distributed layerwise offload.",
     )
     parser.add_argument(
         "--enforce-eager",
@@ -386,6 +419,15 @@ def calculate_dimensions(
     return height, width
 
 
+def _magi2_preview_dimensions(extra_body: dict[str, Any] | None = None) -> tuple[int, int]:
+    resolution = str((extra_body or {}).get("resolution", "540p")).lower()
+    if resolution == "272p":
+        return 448, 256
+    if resolution == "540p":
+        return 896, 512
+    raise ValueError("MAGI-2 Preview resolution must be '272p' or '540p'.")
+
+
 def main():
     args = parse_args()
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(args.seed)
@@ -398,6 +440,7 @@ def main():
     is_sana = model_class_name == "SanaImageToVideoPipeline" or "sana-video" in model_name
     is_cosmos = "cosmos" in model_name or (model_class_name is not None and "cosmos" in model_class_name.lower())
     is_cosmos_edge = is_cosmos and ("edge" in model_name or "edge" in model_class_name_lower)
+    is_magi2 = "magi2" in model_class_name_lower or "magi-2" in model_name or "magi2" in model_name
 
     image = PIL.Image.open(args.image).convert("RGB") if args.image else None
     last_image = PIL.Image.open(args.last_image).convert("RGB") if args.last_image else None
@@ -411,7 +454,20 @@ def main():
 
     # Per-model generation defaults, applied only when the matching flag is omitted.
     # Cosmos3 would otherwise silently inherit the Wan2.2 defaults (wrong size/steps/shift).
-    if is_cosmos_edge:
+    magi2_default_width = None
+    magi2_default_height = None
+    if is_magi2:
+        magi2_default_width, magi2_default_height = _magi2_preview_dimensions(args.extra_body)
+        d_fps, d_guidance, d_num_frames, d_steps, d_flow_shift, d_max_area, d_mod = (
+            12.5,
+            None,
+            125,
+            100,
+            None,
+            magi2_default_width * magi2_default_height,
+            16,
+        )
+    elif is_cosmos_edge:
         # Cosmos3-Edge native defaults: 480x832, gs 5.0, flow_shift 3.0 — NOT the Nano/Super
         # 720p / gs 6.0 / flow_shift 10.0 below, which produce degenerate output on Edge.
         d_fps, d_guidance, d_num_frames, d_steps, d_flow_shift, d_max_area, d_mod = (
@@ -477,14 +533,17 @@ def main():
     # Calculate dimensions if not provided (model-aware max area).
     height = args.height
     width = args.width
-    if height is None or width is None:
+    if is_magi2:
+        height = height or magi2_default_height
+        width = width or magi2_default_width
+    elif height is None or width is None:
         calc_height, calc_width = calculate_dimensions(dimension_image, max_area=d_max_area, mod_value=d_mod)
         height = height or calc_height
         width = width or calc_width
 
     media_inputs: dict[str, Any] = {}
     if image is not None:
-        preserve_image_size = should_preserve_reference_image_size(
+        preserve_image_size = is_magi2 or should_preserve_reference_image_size(
             model_class_name,
             model=args.model,
         )
@@ -558,6 +617,7 @@ def main():
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
         profiler_config=args.profiler_config,
     )
+    omni_kwargs.update(_distributed_layerwise_offload_kwargs(args))
     if args.deploy_config:
         omni_kwargs["deploy_config"] = args.deploy_config
     if flow_shift is not None:
@@ -613,7 +673,7 @@ def main():
         )
 
     negative_prompt = args.negative_prompt
-    if negative_prompt is None and not is_ltx2:
+    if negative_prompt is None and not is_ltx2 and not is_magi2:
         # Preserve the historical empty-prompt behavior for non-LTX examples.
         negative_prompt = ""
     prompt_dict = build_image_to_video_prompt(
@@ -642,6 +702,7 @@ def main():
         boundary_ratio=args.boundary_ratio,
         num_inference_steps=num_inference_steps,
         num_frames=num_frames,
+        fps=fps,
         frame_rate=frame_rate,
         extra_args=sampling_extra_args,
     )

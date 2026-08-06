@@ -22,6 +22,7 @@ from vllm_omni.config.stage_config import _DEPLOY_DIR
 from vllm_omni.config.yaml_util import create_config, load_yaml_config
 from vllm_omni.diffusion.utils.hf_utils import (
     _looks_like_dreamzero,
+    _looks_like_magi2,
     get_diffusion_model_index,
 )
 from vllm_omni.entrypoints.stage_utils import _to_dict
@@ -291,7 +292,9 @@ def resolve_model_config_path(model: str) -> str | None:
         model_type = hf_config.model_type
     except (ValueError, Exception):
         # If standard transformers format fails, try diffusers format
-        if get_diffusion_model_index(config_source) is not None:
+        if _looks_like_magi2(config_source):
+            model_type = "Magi2Pipeline"
+        elif get_diffusion_model_index(config_source) is not None:
             model_type = _try_get_class_name_from_diffusers_config(config_source)
             if model_type is None:
                 raise ValueError(

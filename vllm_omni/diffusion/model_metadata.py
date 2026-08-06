@@ -31,6 +31,10 @@ _DIFFUSION_MODEL_METADATA: dict[str, DiffusionModelMetadata] = {
         supports_multimodal_inputs=True,
         max_multimodal_image_inputs=HUNYUAN_IMAGE3_MAX_INPUT_IMAGES,
     ),
+    "Magi2Pipeline": DiffusionModelMetadata(
+        supports_multimodal_inputs=True,
+        max_multimodal_image_inputs=1,
+    ),
     # Shared by the Base (text-to-image) and Edit (TI2I) checkpoints, which use
     # the same ``BooguImagePipeline`` class. Text-to-image requests simply carry
     # no reference image.

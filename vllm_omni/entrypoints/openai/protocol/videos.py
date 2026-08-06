@@ -55,7 +55,12 @@ class VideoParams(BaseModel):
     width: int | None = Field(default=None, ge=1, le=_INT64_MAX, description="Video width in pixels")
     height: int | None = Field(default=None, ge=1, le=_INT64_MAX, description="Video height in pixels")
     num_frames: int | None = Field(default=None, ge=1, le=_INT64_MAX, description="Number of frames")
-    fps: int | None = Field(default=None, ge=1, le=_INT64_MAX, description="Frames per second for output video")
+    fps: float | None = Field(
+        default=None,
+        ge=1,
+        allow_inf_nan=False,
+        description="Frames per second for output video",
+    )
 
     @property
     def size(self) -> str | None:
@@ -146,7 +151,12 @@ class VideoGenerationRequest(BaseModel):
     # Video-specific fields (top-level for OpenAI-style compatibility)
     width: int | None = Field(default=None, ge=1, le=_INT64_MAX, description="Video width in pixels")
     height: int | None = Field(default=None, ge=1, le=_INT64_MAX, description="Video height in pixels")
-    fps: int | None = Field(default=None, ge=1, le=_INT64_MAX, description="Frames per second for output video")
+    fps: float | None = Field(
+        default=None,
+        ge=1,
+        allow_inf_nan=False,
+        description="Frames per second for output video",
+    )
     num_frames: int | None = Field(default=None, ge=1, le=_INT64_MAX, description="Number of frames to generate")
     aspect_ratio: str | None = Field(
         default=None,
@@ -295,7 +305,7 @@ class VideoGenerationRequest(BaseModel):
             vp.fps = DEFAULT_FPS
 
         if vp.num_frames is None and self.seconds is not None:
-            vp.num_frames = int(self.seconds) * int(vp.fps)
+            vp.num_frames = int(float(self.seconds) * float(vp.fps))
 
         return vp
 

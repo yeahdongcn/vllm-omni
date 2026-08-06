@@ -36,6 +36,10 @@ from vllm_omni.model_extras.ltx2 import (
     ltx_preserves_reference_image_size,
     ltx_transformer_config_subfolder,
 )
+from vllm_omni.model_extras.magi2 import (
+    MAGI2_EXTRA_BODY_PARAMS,
+    MAGI2_EXTRA_OUTPUT_PARAMS,
+)
 from vllm_omni.model_extras.mammothmodal2_preview import (
     MAMMOTHMODA2_PREVIEW_EXTRA_BODY_PARAMS,
     MAMMOTHMODA2_PREVIEW_EXTRA_OUTPUT_PARAMS,
@@ -191,6 +195,10 @@ _EXTRA_SPECS: dict[str, dict[str, Any]] = {
     "Cosmos3OmniPipeline": {
         "extra_body_params": COSMOS3_EXTRA_BODY_PARAMS,
         "extra_output_params": COSMOS3_EXTRA_OUTPUT_PARAMS,
+    },
+    "Magi2Pipeline": {
+        "extra_body_params": MAGI2_EXTRA_BODY_PARAMS,
+        "extra_output_params": MAGI2_EXTRA_OUTPUT_PARAMS,
     },
     "HeliosPipeline": {
         "extra_body_params": HELIOS_EXTRA_BODY_PARAMS,
