@@ -537,7 +537,7 @@ def main():
     model_class_name = args.model_class_name
 
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(args.seed)
-    # Cache-dit config (Wan2.2 only)
+    # Shared Cache-DiT defaults for pipelines that declare an adapter.
     cache_config = None
     if args.cache_backend == "cache_dit":
         cache_config = {

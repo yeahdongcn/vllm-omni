@@ -373,7 +373,6 @@ _NO_CACHE_ACCELERATION = {
     # instead of erroring.
     "Pi0Pipeline",
     "LingBotWorldCausalDMDPipeline",
-    "Magi2Pipeline",
 }
 
 
