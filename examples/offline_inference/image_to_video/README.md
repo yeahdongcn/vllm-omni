@@ -29,10 +29,11 @@ This folder provides a unified CLI script for image-to-video generation using vL
 | `Lightricks/LTX-2` | 512 x 768 | 121 | 40 | video 3.0 / audio 7.0 | Memory use depends on frame count and tensor parallelism |
 | `Efficient-Large-Model/SANA-Video_2B_480p_diffusers` | 480 x 832 | 81 | 50 | 6.0 | Native `SanaImageToVideoPipeline`; Wan VAE |
 | `Efficient-Large-Model/SANA-Video_2B_720p_diffusers` | 704 x 1280 | 81 | 50 | 6.0 | Native `SanaImageToVideoPipeline`; LTX-2 Video VAE |
-| `sand-ai/MAGI-2-preview` | 512 x 896 | 125 | 100 | Model-fixed | Native 4/8-GPU Ulysses; TP=1 |
+| `sand-ai/MAGI-2-preview` | 512 x 896 | 125 | 100 | Model-fixed | Native four-GPU TP/SP; resident SP4 default; DLO available |
 
-MAGI-2 native Preview setup, topology, and I2VA commands are documented in
-the [`MAGI-2 Preview recipe`](../../../recipes/SandAI/MAGI-2-preview.md).
+MAGI-2 native Preview setup, four-GPU topology and DLO choices, I2VA commands,
+and eight-GPU validation status are documented in the
+[`MAGI-2 Preview recipe`](../../../recipes/SandAI/MAGI-2-preview.md).
 
 !!! info
     Peak VRAM: based on basic single-card usage, batch size = 1, without any acceleration/optimization features. Some model weights cannot fit into one card with 80 GiB VRAM, which may need to use CPU offloading.

@@ -168,7 +168,7 @@ The following tables show which models support each feature:
 | **Cosmos3**                  |     ❌     |     ✅      |           ✅           |       ✅        |         ✅         |         ❌         |   ✅    |             ✅             |  ✅ (encode/decode)   |       ✅        |        ❌         |
 | **LongCat-Video-Avatar-1.5** |     ❌     |     ❌      |           ❌           |       ❌        |         ❌         |         ❌         |   ❌    |             ❌             |          ❌           |       ❌        |        ❌         |
 | **MiniMax-H3**               | ✅ (FL2VA) |     ✅      |           ✅           |       ❌        |       ✅ (DiT/TE)  |         ❌         |   ✅    |             ✅             |       ✅ (tile)       |      ✅ (DiT)      |        ❌         |
-| **MAGI-2 Preview**           |     ❌     |     ❌      |      ✅ (Ulysses)       |       ❌        |       ❌ (TP=1)    |         ❌         |   ❌    |      ✅ (DLO no-AG)          |          ❌           |       ❌        |        ❌         |
+| **MAGI-2 Preview**           |     ❌     |     ❌      |      ✅ (Ulysses)       |       ❌        |         ✅         |         ❌         |   ❌    | ✅ (DLO DP-AG/SP no-AG) |          ❌           |       ❌        |        ❌         |
 | **SANA-WM**                  |     ❌     |     ❌      |          ❌<sup>5</sup> |       ✅        |         ✅         |         ❌         |   ❌    |             ❌             |          ❌           |       ❌        |        ❌         |
 
 > Notes:
@@ -178,9 +178,11 @@ The following tables show which models support each feature:
 >    an all-gather before every GDN block. The remaining ❌ columns are simply
 >    unvalidated on this model, not known-broken.
 
-MAGI-2 Preview uses the native vLLM-Omni pipeline with tensor parallel size 1 and a Ulysses group that spans the
-complete 4- or 8-worker world. Distributed layerwise offload is supported only with rank-local weight streaming
-(`--dlo-no-use-allgather`); DLO AllGather is incompatible with the model's overlapping MoE-head partition.
+MAGI-2 Preview uses the native vLLM-Omni pipeline. The default four-worker deployment is resident SP4; native TP4
+and TP2SP2 are also supported. DLO supports DP4 and DP2SP2 with AllGather, or SP4 with rank-local streaming
+(`--dlo-no-use-allgather`). Compatible eight-worker configurations pass topology validation but were not locally
+exercised for this integration. See the
+[`MAGI-2 Preview recipe`](https://github.com/vllm-project/vllm-omni/tree/main/recipes/SandAI/MAGI-2-preview.md).
 
 > **Step execution note:** Helios supports single-request step execution only;
 > use `max_num_seqs=1`.
