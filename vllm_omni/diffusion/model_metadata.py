@@ -11,6 +11,7 @@ class DiffusionModelMetadata:
     supports_multimodal_inputs: bool = False
     max_multimodal_image_inputs: int | None = None
     supports_mixed_reference_inputs: bool = False
+    resize_reference_images_to_output: bool = True
     attention_mask_free: bool = False
     final_output_type: str | None = None
 
@@ -95,6 +96,9 @@ _DIFFUSION_MODEL_METADATA: dict[str, DiffusionModelMetadata] = {
     "SanaWmPipeline": DiffusionModelMetadata(
         supports_multimodal_inputs=True,
         max_multimodal_image_inputs=1,
+        # MAGI-2 preserves the source aspect ratio and applies its own
+        # checkpoint-aligned resize/pad transform during image conditioning.
+        resize_reference_images_to_output=False,
     ),
 }
 
