@@ -168,7 +168,7 @@ The following tables show which models support each feature:
 | **Cosmos3**                  |     ❌     |     ✅      |           ✅           |       ✅        |         ✅         |         ❌         |   ✅    |             ✅             |  ✅ (encode/decode)   |       ✅        |        ❌         |
 | **LongCat-Video-Avatar-1.5** |     ❌     |     ❌      |           ❌           |       ❌        |         ❌         |         ❌         |   ❌    |             ❌             |          ❌           |       ❌        |        ❌         |
 | **MiniMax-H3**               | ✅ (FL2VA) |     ✅      |           ✅           |       ❌        |       ✅ (DiT/TE)  |         ❌         |   ✅    |             ✅             |       ✅ (tile)       |      ✅ (DiT)      |        ❌         |
-| **MAGI-2 Preview**           |     ❌     |     ✅      |      ✅ (Ulysses)       |       ❌        |         ✅         |         ❌         |   ❌    | ✅ (DLO DP-AG/SP no-AG) |          ❌           |       ❌        |        ❌         |
+| **MAGI-2 Preview**           |     ❌     |     ✅      |      ✅ (Ulysses)       |    ✅ (2-way)   |         ✅         |         ❌         |   ✅    | ✅ (DLO DP-AG/SP no-AG) |       ✅ (tile)       |       ❌        |        ❌         |
 | **SANA-WM**                  |     ❌     |     ❌      |          ❌<sup>5</sup> |       ✅        |         ✅         |         ❌         |   ❌    |             ❌             |          ❌           |       ❌        |        ❌         |
 
 > Notes:
