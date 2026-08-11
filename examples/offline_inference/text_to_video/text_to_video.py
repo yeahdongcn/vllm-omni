@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
 import json
@@ -10,25 +10,17 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm_omni.diffusion.data import DiffusionParallelConfig
+from vllm_omni.diffusion.data import DiffusionParallelConfig, resolve_model_class_name
 from vllm_omni.diffusion.utils.param_utils import apply_declared_extra_args
 from vllm_omni.entrypoints.omni import Omni
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.lora.utils import stable_lora_int_id
-from vllm_omni.model_extras import get_extra_body_params, get_model_class_name, get_output_tensor_range
+from vllm_omni.model_extras import get_extra_body_params, get_model_class_name, get_video_generation_defaults
 from vllm_omni.outputs import OmniRequestOutput
 from vllm_omni.platforms import current_omni_platform
 
 _MODEL_PRESETS = {
-    "magi2": {
-        "height": 512,
-        "width": 896,
-        "num_frames": 125,
-        "num_inference_steps": 100,
-        "fps": 12.5,
-        "output": "magi2_output.mp4",
-    },
     "vace": {
         "height": 480,
         "width": 832,
@@ -88,17 +80,6 @@ _MODEL_PRESETS = {
         "fps": 16,
         "output": "helios_output.mp4",
     },
-    "lingbot": {
-        "model_class_name": "LingBotVideoPipeline",
-        "height": 192,
-        "width": 320,
-        "num_frames": 9,
-        "num_inference_steps": 2,
-        "guidance_scale": 3.0,
-        "fps": 24,
-        "flow_shift": 3.0,
-        "output": "lingbot_video_output.mp4",
-    },
     "ltx2": {
         "height": 512,
         "width": 768,
@@ -123,42 +104,7 @@ _MODEL_PRESETS = {
         "fps": 24,
         "output": "ltx23_output.mp4",
     },
-    "sana_480p": {
-        "height": 480,
-        "width": 832,
-        "num_frames": 81,
-        "num_inference_steps": 50,
-        "guidance_scale": 6.0,
-        "fps": 16,
-        "output": "sana_video_480p.mp4",
-    },
-    "sana_720p": {
-        "height": 704,
-        "width": 1280,
-        "num_frames": 81,
-        "num_inference_steps": 50,
-        "guidance_scale": 6.0,
-        "fps": 16,
-        "output": "sana_video_720p.mp4",
-    },
 }
-
-
-def _magi2_preview_preset(extra_body: dict[str, Any] | None = None) -> dict[str, Any]:
-    resolution = str((extra_body or {}).get("resolution", "540p")).lower()
-    if resolution == "272p":
-        width, height = 448, 256
-    elif resolution == "540p":
-        width, height = 896, 512
-    else:
-        raise ValueError("MAGI-2 Preview resolution must be '272p' or '540p'.")
-    return {**_MODEL_PRESETS["magi2"], "height": height, "width": width}
-
-
-def _is_magi2_model(model: str, model_class_name: str | None = None) -> bool:
-    model_lower = model.lower()
-    class_lower = (model_class_name or "").lower()
-    return "magi2" in class_lower or "magi-2" in model_lower or "magi2" in model_lower
 
 
 def _detect_preset(
@@ -167,70 +113,30 @@ def _detect_preset(
     extra_body: dict[str, Any] | None = None,
 ) -> dict:
     model_lower = model.lower()
-    class_lower = (model_class_name or "").lower()
-    if _is_magi2_model(model, model_class_name):
-        return _magi2_preview_preset(extra_body)
-    if "sana-video" in model_lower or "sana_video" in model_lower or "sanavideo" in class_lower:
-        return _MODEL_PRESETS["sana_720p" if "720p" in model_lower else "sana_480p"]
-    if "lingbot" in model_lower or "lingbotvideo" in class_lower:
-        return _MODEL_PRESETS["lingbot"]
-    if "ltx" in class_lower or "ltx" in model_lower:
-        if "distilled" in class_lower or "distilled" in model_lower:
-            return _MODEL_PRESETS["ltx2_distilled"]
-        if "ltx23" in class_lower or "ltx-2.3" in model_lower or "ltx_2.3" in model_lower:
-            return _MODEL_PRESETS["ltx23"]
+    resolved_model_class_name = model_class_name or resolve_model_class_name(model)
+    class_lower = (resolved_model_class_name or "").lower()
+    video_defaults = get_video_generation_defaults(resolved_model_class_name, extra_body)
+    if video_defaults is not None:
+        return video_defaults.cli_defaults()
+    if "distilled" in class_lower or "distilled" in model_lower:
+        return _MODEL_PRESETS["ltx2_distilled"]
+    if "ltx23" in class_lower or "ltx-2.3" in model_lower or "ltx_2.3" in model_lower:
+        return _MODEL_PRESETS["ltx23"]
+    if "ltx2" in class_lower or "ltx-2" in model_lower or "ltx_2" in model_lower:
         return _MODEL_PRESETS["ltx2"]
-    if "vace" in model_lower or "vace" in class_lower:
+    if "vace" in model_lower:
         return _MODEL_PRESETS["vace"]
     # Edge must be matched before the generic cosmos branch (its "cosmos" substring would
     # otherwise pick up the Nano/Super 720p / gs 6.0 / flow_shift 10.0 preset).
     if ("cosmos" in model_lower or "cosmos" in class_lower) and ("edge" in model_lower or "edge" in class_lower):
         return _MODEL_PRESETS["cosmos3_edge"]
-    if "cosmos" in model_lower or "cosmos" in class_lower:
+    if "cosmos" in model_lower:
         return _MODEL_PRESETS["cosmos"]
-    if "hunyuan" in model_lower or "hunyuan" in class_lower:
+    if "hunyuan" in model_lower:
         return _MODEL_PRESETS["hunyuan"]
-    if "helios" in model_lower or "helios" in class_lower:
+    if "helios" in model_lower:
         return _MODEL_PRESETS["helios"]
     return _MODEL_PRESETS["wan"]
-
-
-def build_text_to_video_prompt(prompt: str, negative_prompt: str | None) -> dict[str, Any]:
-    """Build the canonical request envelope for the shared T2V example."""
-    result: dict[str, Any] = {
-        "prompt": prompt,
-        "modalities": ["video"],
-    }
-    if negative_prompt is not None:
-        result["negative_prompt"] = negative_prompt
-    return result
-
-
-def _validate_video_output_type(output_type: str) -> None:
-    if output_type not in {"image", "video"}:
-        raise ValueError(
-            f"Unexpected output type '{output_type}', expected 'video' or legacy 'image' for video generation."
-        )
-
-
-def _distributed_layerwise_offload_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    """Return the distributed layerwise offload options forwarded to Omni."""
-    return {
-        "enable_distributed_layerwise_offload": args.enable_distributed_layerwise_offload,
-        "dlo_use_allgather": args.dlo_use_allgather,
-        "dlo_resident_layers": args.dlo_resident_layers,
-    }
-
-
-def _normalize_float_tensor(tensor: torch.Tensor, source_range: str) -> torch.Tensor:
-    """Normalize decoded frames according to the pipeline's output contract."""
-    if not tensor.is_floating_point():
-        return tensor
-    if source_range == "negative_one_to_one":
-        return tensor.clamp(-1, 1) * 0.5 + 0.5
-    if source_range == "zero_to_one":
-        return tensor.clamp(0, 1)
-    raise ValueError(f"Unsupported floating-point tensor range: {source_range!r}")
 
 
 def parse_profiler_config(value: str) -> dict[str, Any]:
@@ -262,7 +168,7 @@ def parse_extra_body(value: str) -> dict[str, Any]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate a video from a text prompt. "
-        "Supports Wan2.2, HunyuanVideo-1.5, Helios, LingBot-Video, MAGI-2, and other text-to-video models."
+        "Supports Wan2.2, HunyuanVideo-1.5, Helios, MAGI-2, and other text-to-video models."
     )
     parser.add_argument(
         "--model",
@@ -516,7 +422,7 @@ def _extract_peak_memory_mb(result: Any) -> float:
         return 0.0
     val = getattr(result, "peak_memory_mb", 0.0)
     if not val:
-        inner = result
+        inner = getattr(result, "request_output", None)
         if isinstance(inner, list):
             inner = inner[0] if inner else None
         val = getattr(inner, "peak_memory_mb", 0.0)
@@ -544,13 +450,13 @@ def _parallel_config_from_args(args: argparse.Namespace) -> DiffusionParallelCon
 def main():
     args = parse_args()
     model_class_name = args.model_class_name
+    resolved_model_class_name = model_class_name or resolve_model_class_name(args.model)
+    video_defaults = get_video_generation_defaults(resolved_model_class_name, args.extra_body)
 
-    is_magi2 = _is_magi2_model(args.model, model_class_name)
-    preset = _detect_preset(args.model, model_class_name, args.extra_body)
+    preset = _detect_preset(args.model, resolved_model_class_name, args.extra_body)
     for key, default_val in preset.items():
         if getattr(args, key.replace("-", "_"), None) is None:
             setattr(args, key.replace("-", "_"), default_val)
-    model_class_name = args.model_class_name
 
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(args.seed)
     # Shared Cache-DiT defaults for pipelines that declare an adapter.
@@ -569,7 +475,7 @@ def main():
             "scm_steps_policy": "dynamic",
         }
 
-    # Configure parallel settings.
+    # Configure parallel settings
     parallel_config = _parallel_config_from_args(args)
 
     profiler_enabled = args.profiler_config is not None
@@ -587,8 +493,10 @@ def main():
         cache_config=cache_config,
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
         profiler_config=args.profiler_config,
+        enable_distributed_layerwise_offload=args.enable_distributed_layerwise_offload,
+        dlo_use_allgather=args.dlo_use_allgather,
+        dlo_resident_layers=args.dlo_resident_layers,
     )
-    omni_kwargs.update(_distributed_layerwise_offload_kwargs(args))
     if args.deploy_config:
         omni_kwargs["deploy_config"] = args.deploy_config
     if args.boundary_ratio is not None:
@@ -616,7 +524,6 @@ def main():
     omni = Omni(**omni_kwargs)
     model_class_name = get_model_class_name(omni) or model_class_name
     declared_extra_body_params = get_extra_body_params(model_class_name)
-    output_tensor_range = get_output_tensor_range(model_class_name)
 
     if profiler_enabled:
         print("[Profiler] Starting profiling...")
@@ -650,13 +557,15 @@ def main():
             lora_path=lora_path,
         )
 
-    negative_prompt = args.negative_prompt
-    if negative_prompt is None and not is_magi2 and all(
-        preset is not _MODEL_PRESETS[name] for name in ("lingbot", "ltx2", "ltx23")
-    ):
+    prompt_dict = {"prompt": args.prompt}
+    if args.negative_prompt is not None:
+        prompt_dict["negative_prompt"] = args.negative_prompt
+    elif video_defaults is not None:
+        if video_defaults.default_negative_prompt is not None:
+            prompt_dict["negative_prompt"] = video_defaults.default_negative_prompt
+    elif preset not in (_MODEL_PRESETS["ltx2"], _MODEL_PRESETS["ltx23"]):
         # Preserve the historical empty-prompt behavior for non-LTX examples.
-        negative_prompt = ""
-    prompt_dict = build_text_to_video_prompt(args.prompt, negative_prompt)
+        prompt_dict["negative_prompt"] = ""
 
     extra_args = {}
     if lora_request:
@@ -671,10 +580,9 @@ def main():
         num_inference_steps=args.num_inference_steps,
         num_frames=args.num_frames,
         fps=args.fps,
+        frame_rate=args.frame_rate or args.fps,
         extra_args=extra_args,
     )
-    if args.frame_rate is not None:
-        sampling_kwargs["frame_rate"] = args.frame_rate
     if args.guidance_scale_high is not None:
         sampling_kwargs["guidance_scale_2"] = args.guidance_scale_high
 
@@ -709,12 +617,15 @@ def main():
         frames = frames[0] if frames else None
 
     if isinstance(frames, OmniRequestOutput):
-        _validate_video_output_type(frames.final_output_type)
+        if frames.final_output_type != "image":
+            raise ValueError(
+                f"Unexpected output type '{frames.final_output_type}', expected 'image' for video generation."
+            )
         if frames.multimodal_output and "audio" in frames.multimodal_output:
             audio = frames.multimodal_output["audio"]
             audio_sample_rate = frames.multimodal_output.get("audio_sample_rate", audio_sample_rate)
-        if frames.is_pipeline_output and frames is not None:
-            inner_output = frames
+        if frames.is_pipeline_output and frames.request_output is not None:
+            inner_output = frames.request_output
             if isinstance(inner_output, OmniRequestOutput):
                 if inner_output.multimodal_output and "audio" in inner_output.multimodal_output:
                     audio = inner_output.multimodal_output["audio"]
@@ -768,7 +679,8 @@ def main():
                 frame_tensor = frame_tensor[0]
             if frame_tensor.dim() == 3 and frame_tensor.shape[0] in (3, 4):
                 frame_tensor = frame_tensor.permute(1, 2, 0)
-            frame_tensor = _normalize_float_tensor(frame_tensor, output_tensor_range)
+            if frame_tensor.is_floating_point():
+                frame_tensor = frame_tensor.clamp(-1, 1) * 0.5 + 0.5
             return frame_tensor.float().numpy()
         if isinstance(frame, np.ndarray):
             frame_array = frame
@@ -820,7 +732,8 @@ def main():
                 video_tensor = video_tensor[0]
         elif video_tensor.dim() == 4 and video_tensor.shape[0] in (3, 4):
             video_tensor = video_tensor.permute(1, 2, 3, 0)
-        video_tensor = _normalize_float_tensor(video_tensor, output_tensor_range)
+        if video_tensor.is_floating_point():
+            video_tensor = video_tensor.clamp(-1, 1) * 0.5 + 0.5
         video_array = video_tensor.float().numpy()
     elif isinstance(frames, np.ndarray):
         video_array = frames
