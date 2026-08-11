@@ -12,7 +12,18 @@ DIFFUSION_MODEL_INDEX_FILES = (
     "modular_model_index.json",
 )
 
-MAGI2_PREVIEW_MODEL_ID = "sand-ai/MAGI-2-preview"
+_NATIVE_DIFFUSION_MODEL_SIGNATURES = (
+    (
+        "sand-ai/MAGI-2-preview",
+        "Magi2Pipeline",
+        (
+            "preview/model.safetensors.index.json",
+            "text_encoder/config.json",
+            "vae/Wan2.2_VAE.pth",
+            "turbo_vae/checkpoint.ckpt",
+        ),
+    ),
+)
 
 
 def get_diffusion_model_index(
@@ -48,29 +59,22 @@ def _looks_like_bagel(model_name: str) -> bool:
         return False
 
 
-def _looks_like_magi2(model_name: str) -> bool:
-    """Detect SandAI MAGI-2, whose repository has no root HF config.
+def resolve_native_diffusion_model_class(model_name: str) -> str | None:
+    """Resolve native checkpoints that have no root HF or Diffusers config."""
 
-    The official Hub ID is accepted directly. Local copies must contain the
-    distinctive preview checkpoint index plus the native pipeline's auxiliary
-    model files; a name substring alone is intentionally insufficient.
-    """
     normalized = str(model_name).strip().rstrip("/")
     hub_prefix = "https://huggingface.co/"
     if normalized.lower().startswith(hub_prefix):
         normalized = normalized[len(hub_prefix) :]
         normalized = normalized.split("/tree/", 1)[0]
-    if normalized.lower() == MAGI2_PREVIEW_MODEL_ID.lower():
-        return True
-    if not os.path.isdir(normalized):
-        return False
-    required = (
-        "preview/model.safetensors.index.json",
-        "text_encoder/config.json",
-        "vae/Wan2.2_VAE.pth",
-        "turbo_vae/checkpoint.ckpt",
-    )
-    return all(os.path.isfile(os.path.join(normalized, *relative.split("/"))) for relative in required)
+    for model_id, pipeline_class, required_files in _NATIVE_DIFFUSION_MODEL_SIGNATURES:
+        if normalized.lower() == model_id.lower():
+            return pipeline_class
+        if os.path.isdir(normalized) and all(
+            os.path.isfile(os.path.join(normalized, *relative.split("/"))) for relative in required_files
+        ):
+            return pipeline_class
+    return None
 
 
 def _looks_like_dreamzero(model_name: str) -> bool:
@@ -131,9 +135,9 @@ def is_diffusion_model(model_name: str) -> bool:
     2. Check using vllm's get_hf_file_to_dict utility
     3. Try the standard diffusers approach (may fail due to import issues)
     """
-    # MAGI-2 is a non-Diffusers diffusion repository without model_index.json
-    # or root config.json, so recognize its exact Hub ID/local file signature.
-    if _looks_like_magi2(model_name):
+    # Some native diffusion checkpoints have neither a standard Diffusers
+    # index nor a root HF config. Recognize their exact Hub ID/local signature.
+    if resolve_native_diffusion_model_class(model_name) is not None:
         return True
 
     # Strategy 1: Check local file system first (fastest, avoids import issues)

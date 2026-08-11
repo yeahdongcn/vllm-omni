@@ -594,9 +594,10 @@ class Magi2PreviewTransformer(nn.Module):
     """Native preview DiT with the released checkpoint hierarchy."""
 
     # ``block`` must remain the registered child name because it is part of the
-    # released checkpoint hierarchy.  Magi2TransformerBlock is iterable, so the
-    # offload backends still discover each individual transformer layer.
-    _layerwise_offload_blocks_attrs = ["block"]
+    # released checkpoint hierarchy.  The ``layers`` property below exposes its
+    # ModuleList through the standard layerwise-offload contract without
+    # changing the registered module names.
+    _layerwise_offload_blocks_attrs = ["layers"]
     _hsdp_shard_conditions = [_is_magi2_transformer_layer]
     _hsdp_preserve_parameter_dtypes = True
     _EP_SHARDED_SUFFIXES = (
@@ -623,6 +624,12 @@ class Magi2PreviewTransformer(nn.Module):
             for index, layer in enumerate(self.block.layers)
             if isinstance(layer.mlp, Magi2MultiHeadMoELayer)
         ]
+
+    @property
+    def layers(self) -> nn.ModuleList:
+        """Expose Preview layers to the shared offload block discovery API."""
+
+        return self.block.layers
 
     def forward(
         self,
@@ -679,6 +686,12 @@ class Magi2PreviewTransformer(nn.Module):
     def validate_loaded_weights(self, loaded_names: set[str]) -> None:
         """Fail closed when the mmap loader misses a Preview tensor."""
 
+        loaded_names = {
+            name.replace("transformer.layers.", "transformer.block.layers.", 1)
+            if name.startswith("transformer.layers.")
+            else name
+            for name in loaded_names
+        }
         expected = {f"transformer.{name}" for name, _ in self.named_parameters()}
         missing = expected - loaded_names
         if missing:

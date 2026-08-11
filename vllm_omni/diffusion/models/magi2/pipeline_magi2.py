@@ -478,14 +478,13 @@ class Magi2Pipeline(
     def _remap_ckpt_key(checkpoint_key: str) -> str | None:
         """Map released Preview keys to the native pipeline namespace."""
 
+        if checkpoint_key.startswith("block.layers."):
+            # The offload API sees the model-owned ``layers`` property while
+            # the registered checkpoint hierarchy remains ``block.layers``.
+            return f"transformer.layers.{checkpoint_key.removeprefix('block.layers.')}"
         if checkpoint_key.startswith(("block.", "pre_adapter.", "post_adapter.")):
             return f"transformer.{checkpoint_key}"
         return None
-
-    def _get_mmap_checkpoint_path(self) -> str:
-        """Return the transformer checkpoint selected during pipeline setup."""
-
-        return str(Path(self.checkpoint_root) / "preview")
 
     def __init__(self, od_config: OmniDiffusionConfig, **kwargs: object) -> None:
         if kwargs:
@@ -543,6 +542,10 @@ class Magi2Pipeline(
             # Preview transformer on CPU first would defeat that memory model.
             with torch.device("meta"):
                 self.transformer = Magi2PreviewTransformer(MAGI2_PREVIEW_CONFIG)
+            # The mmap path is inference-only. Removing autograd ownership here
+            # lets the shared DLO backend shard views without a MAGI-specific
+            # detach branch.
+            self.transformer.requires_grad_(False)
         else:
             self.transformer = Magi2PreviewTransformer(MAGI2_PREVIEW_CONFIG)
         self.data_proxy = Magi2DataProxy()

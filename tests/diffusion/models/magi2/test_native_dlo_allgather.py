@@ -51,7 +51,9 @@ pytestmark = [pytest.mark.diffusion, pytest.mark.cpu, pytest.mark.core_model]
 
 def _tiny_config() -> Magi2PreviewConfig:
     return Magi2PreviewConfig(
-        num_layers=1,
+        # The released checkpoint has 40 layers. Keep this tiny fixture at two
+        # so it exercises the shared backend's streamable-block contract.
+        num_layers=2,
         hidden_size=16,
         head_dim=8,
         num_query_groups=2,
@@ -59,7 +61,7 @@ def _tiny_config() -> Magi2PreviewConfig:
         audio_in_channels=4,
         text_in_channels=4,
         intermediate_factor=2,
-        multimodal_layers=(0,),
+        multimodal_layers=(0, 1),
         params_dtype=torch.float32,
         mhc=Magi2MHCConfig(num_streams=2),
         moe=Magi2MoEConfig(
@@ -69,7 +71,7 @@ def _tiny_config() -> Magi2PreviewConfig:
             expert_intermediate_size=8,
             shared_expert_intermediate_size=8,
             modality_shared_expert_intermediate_size=8,
-            layers=(0,),
+            layers=(0, 1),
         ),
     )
 
@@ -149,6 +151,7 @@ def _load_mmap_transform_and_reconstruct(
 
         with torch.device("meta"):
             target = Magi2PreviewTransformer(_tiny_config())
+        target.requires_grad_(False)
         pipeline = Magi2Pipeline.__new__(Magi2Pipeline)
         nn.Module.__init__(pipeline)
         pipeline.checkpoint_root = checkpoint_root
