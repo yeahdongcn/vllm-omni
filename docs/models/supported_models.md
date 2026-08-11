@@ -119,20 +119,3 @@ explicitly documented in that recipe. Other rows retain the implementation
 support metadata until their recipe is audited.
 
 ✅︎ indicates the model is supported on that backend. Empty cells mean not listed as supported on that backend.
-
-See the [LingBot-World 2.0 recipe](https://github.com/vllm-project/vllm-omni/blob/main/recipes/Robbyant/LingBot-World-2.0.md)
-for offline and experimental realtime usage, supported controls, validation,
-and current limitations.
-
-<sup>H3</sup> MiniMax H3 AMD GPU support is validated on gfx942 (MI300X) and
-gfx950 (MI350) in BF16, using the AITER `FLASH_ATTN` diffusion attention backend.
-Other AMD SKUs (e.g. MI325X) are not listed until their
-own validation evidence is added. See the
-[MiniMax H3 recipe](https://recipes.vllm.ai/MiniMaxAI/MiniMax-H3) for
-per-architecture serving commands.
-
-<sup>2</sup> MAGI-2 Preview runs through the native vLLM-Omni pipeline. The reference-aligned default is resident
-SP4; native TP4 and TP2SP2 plus DLO DP4, DP2SP2, and rank-local SP4 are supported on four GPUs. Compatible
-single-worker execution uses ordinary layerwise offload with native auxiliary CPU staging. Compatible eight-worker
-configurations pass topology validation but were not locally exercised for this integration. See the
-[`MAGI-2 Preview recipe`](https://github.com/vllm-project/vllm-omni/tree/main/recipes/SandAI/MAGI-2-preview.md).
