@@ -103,6 +103,8 @@ def build_image_to_video_prompt(
     if negative_prompt is not None:
         result["negative_prompt"] = negative_prompt
     return result
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
