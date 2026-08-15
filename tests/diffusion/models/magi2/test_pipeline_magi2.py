@@ -208,6 +208,9 @@ def test_forward_maps_272p_i2v_and_output_resize(monkeypatch):
 
     call = runtime.calls[0]
     assert call["image"] is image
+    assert pipe._ensure_figure_token(call["prompt"]) == (
+        "The first frame begins moving\nreference_layer:The first frame refers to <Figure 1>"
+    )
     assert (call["width"], call["height"]) == (448, 256)
     assert call["num_inference_steps"] == 1
     assert result.output["payload"]["video"].shape == (2, 4, 6, 3)
@@ -222,6 +225,7 @@ def test_forward_maps_272p_i2v_and_output_resize(monkeypatch):
         ("prompt", {"resolution": "720p"}, "Unsupported native"),
         ("prompt", {"resolution": "1080p"}, "Unsupported native"),
         ("prompt", {"resolution": "540p", "use_refiner": True}, "refiner"),
+        ("prompt", {"output_width": 0, "output_height": 4}, "positive integers"),
     ],
 )
 def test_forward_rejects_invalid_preview_requests(
@@ -234,6 +238,14 @@ def test_forward_rejects_invalid_preview_requests(
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(OmniClientError, match=message):
         pipe(_request(prompt, extra_args=extra_args))
+    assert not runtime.calls
+
+
+def test_forward_rejects_zero_inference_steps_before_generation(monkeypatch):
+    pipe, runtime = _pipeline()
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(OmniClientError, match="inference steps must be positive"):
+        pipe(_request("prompt", num_inference_steps=0))
     assert not runtime.calls
 
 

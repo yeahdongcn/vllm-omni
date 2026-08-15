@@ -220,7 +220,9 @@ def _mh_moe_kernel(
 
     token_positions = token_start + token_offsets
     token_mask = token_offsets < count
-    gather_ids = tl.load(gather_ids_ptr + token_positions, mask=token_mask, other=0)
+    # Token indices fit in int32, but multiplying a large packed-batch index by
+    # the hidden-width stride does not. Promote before computing element offsets.
+    gather_ids = tl.load(gather_ids_ptr + token_positions, mask=token_mask, other=0).to(tl.int64)
     probabilities = tl.load(probs_ptr + token_positions, mask=token_mask, other=0.0)
     x_base = gather_ids * stride_x_s + head * stride_x_h
     output_acc = tl.zeros([block_t, d_head], dtype=acc_dtype)

@@ -202,15 +202,11 @@ def scatter_seqlen_gather_heads(
     tensor: torch.Tensor,
     split_sizes: list[int],
     group: Magi2ParallelGroup | None = None,
-    *,
-    async_op: bool = False,
-) -> torch.Tensor | tuple[torch.Tensor, dist.Work | _CompletedWork]:
+) -> torch.Tensor:
     """Ulysses ``[sum(S_r), H, D] -> [S_rank, world*H, D]`` exchange."""
 
     group = group or get_magi2_ulysses_group()
     if group.world_size == 1:
-        if async_op:
-            return tensor, _CompletedWork()
         return tensor
     if tensor.ndim != 3 or not tensor.is_contiguous():
         raise ValueError("Ulysses attention input must be contiguous [S,H,D]")
@@ -223,21 +219,18 @@ def scatter_seqlen_gather_heads(
         dtype=tensor.dtype,
         device=tensor.device,
     )
-    work = dist.all_to_all_single(
+    dist.all_to_all_single(
         output,
         tensor,
         output_split_sizes=[local_tokens] * group.world_size,
         input_split_sizes=split_sizes,
         group=group.group,
-        async_op=async_op,
     )
     output = (
         output.view(group.world_size, local_tokens, tensor.shape[1], tensor.shape[2])
         .permute(1, 0, 2, 3)
         .reshape(local_tokens, group.world_size * tensor.shape[1], tensor.shape[2])
     )
-    if async_op:
-        return output, work
     return output
 
 
@@ -370,14 +363,6 @@ def ep_undispatch(
         group=group.group,
     )
     return output.permute(1, 0, 2, 3).contiguous().view(sequence, group.world_size * local_heads, dim)
-
-
-class _CompletedWork:
-    """A rank-local stand-in for ``torch.distributed.Work``."""
-
-    @staticmethod
-    def wait() -> None:
-        return None
 
 
 class Magi2SequenceDispatcher:

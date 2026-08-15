@@ -33,7 +33,7 @@ This folder provides a unified CLI script for image-to-video generation using vL
 
 MAGI-2 native Preview setup, four-GPU topology and DLO choices, I2VA commands,
 and eight-GPU validation status are documented in the
-[`MAGI-2 Preview recipe`](../../../recipes/SandAI/MAGI-2-preview.md).
+[`MAGI-2 Preview L20X recipe`](../../../recipes/SandAI/MAGI-2-preview-L20X.md).
 
 !!! info
     Peak VRAM: based on basic single-card usage, batch size = 1, without any acceleration/optimization features. Some model weights cannot fit into one card with 80 GiB VRAM, which may need to use CPU offloading.

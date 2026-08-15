@@ -31,17 +31,20 @@ the repository has no such table; update the closest shared user contract.
 
 ## Structure the recipe
 
-Keep the recipe task-oriented and use one model-family file under
-`recipes/<vendor>/` by default.
+Keep the recipe task-oriented and use one hardware-specific file named
+`recipes/<vendor>/<model>-<hardware>.md`. A recipe may contain multiple
+deployment topologies on that hardware, but each additional accelerator model
+or platform requires its own suffixed file.
 
-1. **Summary:** vendor, exact model ID, runtime, modes, recommended deployment,
-   and maintainer.
+1. **Summary:** vendor, exact model ID, runtime, modes, named hardware,
+   recommended deployment, and maintainer.
 2. **Supported model contract:** put task, input, output, and provided-profile
    tables before setup or commands.
 3. **References:** link the canonical model source, shared examples, supported
    model table, and feature matrix.
 4. **Checkpoint/setup:** pin revisions when possible and state required assets.
-5. **Hardware support:** give one section per validated platform and profile.
+5. **Hardware:** document the single accelerator named by the file suffix,
+   including every validated device-count/topology profile on it.
 6. **Commands:** reuse shared `examples/` entrypoints unless the model contract
    truly requires a dedicated script. Include offline and online paths that
    were validated.
@@ -66,7 +69,9 @@ Record OS, Python, driver/runtime, framework versions, and the vLLM-Omni
 revision in a separate software-environment table. Keep precision, worker
 count, and DP/TP/SP/PP sizes with the deployment profile or exact command.
 
-Never generalize a result from one accelerator family to another. Distinguish
+Never generalize a result from one accelerator family to another or combine
+NVIDIA, AMD, NPU, or distinct accelerator models in one recipe. Create a
+separate hardware-suffixed recipe and `recipes/README.md` row. Distinguish
 upstream requirements from hardware exercised by the PR.
 
 ## Keep shared documentation concise

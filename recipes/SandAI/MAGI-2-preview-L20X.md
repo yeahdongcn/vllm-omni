@@ -1,4 +1,4 @@
-# MAGI-2 Preview
+# MAGI-2 Preview — NVIDIA L20X
 
 > Native text/image-to-video-and-audio generation with the released Preview stage
 
@@ -8,6 +8,7 @@
 - Model: `sand-ai/MAGI-2-preview`
 - Runtime: Native vLLM-Omni pipeline; no SandAI runtime import
 - Modes: Offline shared examples and OpenAI-compatible video serving
+- Hardware: NVIDIA L20X 140 GiB
 - Recommended deployment: Four-GPU resident SP4 (`TP=1`, `SP=4`)
 - Maintainer: Community
 

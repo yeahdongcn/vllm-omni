@@ -1,6 +1,10 @@
-# Recipe Title
+# Recipe Title — Hardware
 
-> Example: Qwen3-Omni for speech chat
+> Example: Qwen3-Omni for speech chat — H100
+
+Name the file `recipes/<vendor>/<model>-<hardware>.md`. Keep exactly one
+hardware profile in each recipe; add a separate suffixed recipe when another
+accelerator is qualified.
 
 ## Summary
 
@@ -8,6 +12,7 @@
 - Model:
 - Task:
 - Mode:
+- Hardware:
 - Maintainer:
 
 ## When to use this recipe
@@ -21,7 +26,7 @@ Put user-visible constraints before commands. Use compact tables for:
 - supported tasks and shared entrypoints;
 - input modalities, counts, duration/geometry limits, and required combinations;
 - output duration, geometry, frame/audio rates, and variants;
-- the hardware/deployment profiles that this recipe actually provides.
+- the deployment profiles provided on this recipe's named hardware.
 
 Source model specifications from the canonical model card or repository. Do
 not copy values from a sibling model or infer support from configuration alone.
@@ -32,26 +37,19 @@ not copy values from a sibling model or infer support from configuration alone.
 - Related example under `examples/`:
 - Related issue or discussion:
 
-## Hardware Support
-
-Add one section per platform, such as `GPU`, `ROCm`, or `NPU`. Under each
-platform section, document one or more tested hardware configurations. Name
-the accelerator model, per-device memory, device count, device interconnect,
-and relevant host-memory capacity. Separate upstream requirements and
-configuration-only support from locally runtime-qualified hardware.
-
-## GPU
-
-### 1x A100 80GB
-
-#### Hardware
+## Hardware
 
 - Accelerator model and per-device memory:
 - Number of devices:
 - Device interconnect (NVLink, PCIe, or other):
 - Host memory, when CPU offload or staging is relevant:
+- Qualification scope:
 
-#### Software environment
+Do not add a second accelerator to this file. Create another
+`<model>-<hardware>.md` recipe instead. Mention unqualified upstream hardware
+only as a limitation, not as a provided profile.
+
+## Software environment
 
 - OS:
 - Python:
@@ -62,7 +60,7 @@ configuration-only support from locally runtime-qualified hardware.
 Keep worker counts, precision, and TP/SP/DP/PP sizes with the command or
 deployment profile; they are not software-environment properties.
 
-#### Command
+## Command
 
 Serve commands use `vllm serve <model> --omni`. The `--omni` flag is what
 selects the Omni pipeline, so it is required and cannot be dropped.
@@ -71,45 +69,17 @@ selects the Omni pipeline, so it is required and cannot be dropped.
 # Add the exact command(s) here
 ```
 
-#### Verification
+## Verification
 
 ```bash
 # Add a quick validation command or expected output here
 ```
 
-#### Notes
+## Notes
 
 - Memory usage:
 - Key flags:
 - Known limitations:
-
-### 2x L40S
-
-Repeat the same structure for other hardware setups as needed.
-
-## ROCm
-
-### Example hardware configuration
-
-Repeat the same nested structure for ROCm setups as needed:
-
-- `#### Hardware`
-- `#### Software environment`
-- `#### Command`
-- `#### Verification`
-- `#### Notes`
-
-## NPU
-
-### Example hardware configuration
-
-Repeat the same nested structure for NPU setups as needed:
-
-- `#### Hardware`
-- `#### Software environment`
-- `#### Command`
-- `#### Verification`
-- `#### Notes`
 
 ## Supported features
 

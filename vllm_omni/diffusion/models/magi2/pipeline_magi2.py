@@ -743,7 +743,7 @@ class Magi2Pipeline(
             value["reference_layer"] = ["The first frame refers to <Figure 1>"]
             return json.dumps(value, ensure_ascii=False)
         except (json.JSONDecodeError, TypeError, ValueError):
-            return prompt + "reference_layer:The first frame refers to <Figure 1>"
+            return prompt + "\nreference_layer:The first frame refers to <Figure 1>"
 
     def _encode_reference_image(
         self,
@@ -976,9 +976,23 @@ class Magi2Pipeline(
         api_derived_frames = int(seconds * float(requested_fps or 24))
         if requested_frames not in {None, 1, 125, api_derived_frames}:
             raise OmniClientError(f"MAGI-2 Preview output is fixed at 125 frames; got {requested_frames}.")
-        steps = int(sampling.num_inference_steps or MAGI2_GENERATION_CONFIG.preview_steps)
+        requested_steps = sampling.num_inference_steps
+        steps = MAGI2_GENERATION_CONFIG.preview_steps if requested_steps is None else int(requested_steps)
         if steps <= 0:
             raise OmniClientError("MAGI-2 inference steps must be positive")
+
+        output_width = extra.get("output_width", sampling.width)
+        output_height = extra.get("output_height", sampling.height)
+        if (output_width is None) != (output_height is None):
+            raise OmniClientError("MAGI-2 output resize requires output_width and output_height")
+        if output_width is not None:
+            try:
+                output_width = int(output_width)
+                output_height = int(output_height)
+            except (TypeError, ValueError) as exc:
+                raise OmniClientError("MAGI-2 output dimensions must be positive integers") from exc
+            if output_width <= 0 or output_height <= 0:
+                raise OmniClientError("MAGI-2 output dimensions must be positive integers")
 
         requested_deterministic = extra.get("deterministic")
         if requested_deterministic is not None and _env_flag(requested_deterministic) != self.deterministic:
@@ -1011,12 +1025,8 @@ class Magi2Pipeline(
                 monitor.stop()
         elapsed = time.perf_counter() - started
 
-        output_width = extra.get("output_width", sampling.width)
-        output_height = extra.get("output_height", sampling.height)
-        if (output_width is None) != (output_height is None):
-            raise OmniClientError("MAGI-2 output resize requires output_width and output_height")
         if video is not None and output_width is not None:
-            video = _resize_video(video, int(output_width), int(output_height))
+            video = _resize_video(video, output_width, output_height)
 
         peak_memory_mb = monitor.peak_bytes / 1024**2 if monitor is not None else 0.0
         if has_cuda and dist.is_available() and dist.is_initialized() and self._parallel_group.world_size > 1:

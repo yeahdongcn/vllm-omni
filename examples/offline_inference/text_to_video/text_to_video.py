@@ -579,10 +579,11 @@ def main():
         guidance_scale=args.guidance_scale,
         num_inference_steps=args.num_inference_steps,
         num_frames=args.num_frames,
-        fps=args.fps,
-        frame_rate=args.frame_rate or args.fps,
         extra_args=extra_args,
     )
+    if video_defaults is not None:
+        sampling_kwargs["fps"] = args.fps
+        sampling_kwargs["frame_rate"] = args.frame_rate or args.fps
     if args.guidance_scale_high is not None:
         sampling_kwargs["guidance_scale_2"] = args.guidance_scale_high
 
