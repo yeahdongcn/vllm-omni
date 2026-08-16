@@ -686,13 +686,9 @@ class Magi2PreviewTransformer(nn.Module):
     def validate_loaded_weights(self, loaded_names: set[str]) -> None:
         """Fail closed when the mmap loader misses a Preview tensor."""
 
-        loaded_names = {
-            name.replace("transformer.layers.", "transformer.block.layers.", 1)
-            if name.startswith("transformer.layers.")
-            else name
-            for name in loaded_names
-        }
-        expected = {f"transformer.{name}" for name, _ in self.named_parameters()}
+        loaded_names = {name.removeprefix("transformer.") for name in loaded_names}
+        loaded_names = {f"block.{name}" if name.startswith("layers.") else name for name in loaded_names}
+        expected = {name for name, _ in self.named_parameters()}
         missing = expected - loaded_names
         if missing:
             raise ValueError(f"MAGI-2 Preview mmap loading is missing {len(missing)} weights: {sorted(missing)[:8]}")

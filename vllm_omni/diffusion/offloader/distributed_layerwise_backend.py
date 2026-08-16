@@ -300,11 +300,15 @@ class DistributedLayerwiseOffloadHook(ModelHook):
             offset = offsets.get(dtype, 0)
             transform = (tensor_transforms or {}).get(id(target))
             runtime_source = transform(source) if callable(transform) else source
-            if runtime_source.dtype != dtype or runtime_source.shape != source.shape:
+            if not isinstance(runtime_source, torch.Tensor):
+                raise TypeError(
+                    f"mmap weight transform for {name!r} returned "
+                    f"{type(runtime_source).__name__}, expected torch.Tensor"
+                )
+            if runtime_source.dtype != dtype:
                 raise ValueError(
-                    "mmap weight transform changed tensor metadata for "
-                    f"{name!r}: expected dtype={dtype}, shape={tuple(source.shape)}, "
-                    f"got dtype={runtime_source.dtype}, shape={tuple(runtime_source.shape)}"
+                    "mmap weight transform changed tensor dtype for "
+                    f"{name!r}: expected {dtype}, got {runtime_source.dtype}"
                 )
             stride = runtime_source.stride()
             storage_numel = (

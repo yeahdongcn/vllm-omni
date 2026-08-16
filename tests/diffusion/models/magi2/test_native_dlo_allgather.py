@@ -18,6 +18,9 @@ from safetensors.torch import load_file, save_file
 
 import vllm_omni.diffusion.models.magi2.layers as layers_module
 import vllm_omni.diffusion.models.magi2.mh_moe as mh_moe_module
+from vllm_omni.diffusion.model_loader.host_weight_plan import (
+    build_checkpoint_mmap_plan,
+)
 from vllm_omni.diffusion.models.magi2.configuration_magi2 import (
     Magi2MHCConfig,
     Magi2MoEConfig,
@@ -35,8 +38,11 @@ from vllm_omni.diffusion.offloader.distributed_layerwise_backend import (
 
 
 @dataclass(frozen=True)
-class _BackendConfigStub:
-    model_path: str
+class _WeightSourceStub:
+    model_or_path: str
+    subfolder: str
+    revision: str | None
+    prefix: str
 
 
 @dataclass(frozen=True)
@@ -157,12 +163,33 @@ def _load_mmap_transform_and_reconstruct(
         pipeline.checkpoint_root = checkpoint_root
         pipeline.transformer = target
 
+        plan_result = build_checkpoint_mmap_plan(
+            pipeline,
+            dit_modules=(("transformer", target),),
+            sources=(
+                _WeightSourceStub(
+                    model_or_path=checkpoint_root,
+                    subfolder="preview",
+                    revision=None,
+                    prefix="transformer.",
+                ),
+            ),
+            model_path=checkpoint_root,
+            tensor_parallel_size=1,
+            use_hsdp=False,
+            online_quantization=False,
+        )
+        assert plan_result.fallback_reason is None
+        assert plan_result.plan is not None
+
         backend = object.__new__(DistributedLayerwiseOffloadBackend)
-        backend.config = _BackendConfigStub(model_path=checkpoint_root)
         backend.device = torch.device("cpu")
+        backend._using_rank_local_mmap = False
+        backend._mmap_transforms_by_tensor_id = {}
         backend._load_weights_via_mmap(
             pipeline,
             _PipelineModulesStub(dits=[target], dit_names=["transformer"]),
+            plan_result.plan,
         )
 
     target_block = target.block.layers[0]
@@ -175,9 +202,10 @@ def _load_mmap_transform_and_reconstruct(
     # shard, so DP peers gather identical SP-local layouts in DP2SP2.
     moe_name = "mlp.moe_mlp.gate"
     mmap_moe = target_parameters[moe_name]
-    assert mmap_moe.mmap_weight_transform_pending is True
-    assert callable(mmap_moe.mmap_weight_transform)
+    mmap_transform = backend._mmap_transforms_by_tensor_id[id(mmap_moe)]
+    assert callable(mmap_transform)
     assert tuple(mmap_moe.shape) == tuple(checkpoint[f"block.layers.0.{moe_name}"].shape)
+    assert tuple(mmap_transform(mmap_moe).shape) == tuple(oracle_parameters[moe_name].shape)
 
     # Keep this gloo regression accelerator-isolated. Pinned allocation is the
     # final, layout-preserving operation in _shard_and_pin and has separate
@@ -188,6 +216,7 @@ def _load_mmap_transform_and_reconstruct(
         dp_size=dp_size,
         rank=dp_rank,
         pin_memory=False,
+        tensor_transforms=backend._mmap_transforms_by_tensor_id,
     )
     assert all(not shard.requires_grad for shard in cpu_shards.values())
     assert all(parameter.numel() == 0 for parameter in target_block.parameters())

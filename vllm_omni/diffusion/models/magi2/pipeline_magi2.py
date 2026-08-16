@@ -478,10 +478,7 @@ class Magi2Pipeline(
     def _remap_ckpt_key(checkpoint_key: str) -> str | None:
         """Map released Preview keys to the native pipeline namespace."""
 
-        if checkpoint_key.startswith("block.layers."):
-            # The offload API sees the model-owned ``layers`` property while
-            # the registered checkpoint hierarchy remains ``block.layers``.
-            return f"transformer.layers.{checkpoint_key.removeprefix('block.layers.')}"
+        checkpoint_key = checkpoint_key.removeprefix("transformer.")
         if checkpoint_key.startswith(("block.", "pre_adapter.", "post_adapter.")):
             return f"transformer.{checkpoint_key}"
         return None
