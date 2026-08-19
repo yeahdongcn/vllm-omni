@@ -27,6 +27,10 @@ class CudaOmniPlatform(OmniPlatform, CudaPlatformBase):
     _omni_enum = OmniPlatformEnum.CUDA
 
     @classmethod
+    def supports_minimax_h3_triton_modulation(cls) -> bool:
+        return True
+
+    @classmethod
     def get_omni_ar_worker_cls(cls) -> str:
         return "vllm_omni.worker.gpu_ar_worker.GPUARWorker"
 

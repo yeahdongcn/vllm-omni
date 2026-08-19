@@ -266,6 +266,10 @@ class OmniPlatform(Platform):
         return True
 
     @classmethod
+    def supports_minimax_h3_triton_modulation(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_float64(cls) -> bool:
         return True
 

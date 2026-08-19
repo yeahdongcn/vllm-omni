@@ -30,6 +30,15 @@ class SiluAndMul(CustomOp):
         self.op(out, x)
         return out
 
+    def forward_musa(self, x: torch.Tensor) -> torch.Tensor:
+        if x.device.type != "musa":
+            return self.forward_native(x)
+        d = x.shape[-1] // 2
+        output_shape = x.shape[:-1] + (d,)
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        self.op(out, x)
+        return out
+
     def forward_npu(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_native(x)
 

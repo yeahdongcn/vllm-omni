@@ -4,8 +4,18 @@
 from __future__ import annotations
 
 import torch
-import triton
-import triton.language as tl
+from vllm.triton_utils import HAS_TRITON, tl, triton
+
+from vllm_omni.platforms import current_omni_platform
+
+
+def _can_use_triton(*tensors: torch.Tensor) -> bool:
+    if not HAS_TRITON or not current_omni_platform.supports_minimax_h3_triton_modulation():
+        return False
+    device = tensors[0].device
+    return device.type == current_omni_platform.device_type and all(
+        tensor.device == device and tensor.ndim > 0 and tensor.stride(-1) == 1 for tensor in tensors
+    )
 
 
 @triton.jit
@@ -80,6 +90,7 @@ def _rms_norm_indexed_scale_shift_kernel(
     hidden_size: tl.constexpr,
     eps: tl.constexpr,
     stride_x_row,
+    stride_output_row,
     stride_shift_row,
     stride_scale_row,
     stride_indices,
@@ -98,7 +109,7 @@ def _rms_norm_indexed_scale_shift_kernel(
     shift = tl.load(shift_ptr + index * stride_shift_row + columns, mask=mask, other=0.0).to(tl.float32)
     scale = tl.load(scale_ptr + index * stride_scale_row + columns, mask=mask, other=0.0).to(tl.float32)
     tl.store(
-        output_ptr + row * hidden_size + columns,
+        output_ptr + row * stride_output_row + columns,
         normalized * (1.0 + scale) + shift,
         mask=mask,
     )
@@ -118,6 +129,8 @@ def _indexed_gate_rms_norm_scale_shift_kernel(
     hidden_size: tl.constexpr,
     eps: tl.constexpr,
     stride_residual_row,
+    stride_residual_out_row,
+    stride_modulated_out_row,
     stride_gate_row,
     stride_branch_row,
     stride_shift_row,
@@ -134,7 +147,7 @@ def _indexed_gate_rms_norm_scale_shift_kernel(
     gate = tl.load(gate_ptr + index * stride_gate_row + columns, mask=mask, other=0.0).to(tl.float32)
     branch = tl.load(branch_ptr + row * stride_branch_row + columns, mask=mask, other=0.0).to(tl.float32)
     updated = residual + gate * branch
-    tl.store(residual_out_ptr + row * hidden_size + columns, updated, mask=mask)
+    tl.store(residual_out_ptr + row * stride_residual_out_row + columns, updated, mask=mask)
 
     weight = tl.load(weight_ptr + columns, mask=mask, other=0.0).to(tl.float32)
     variance = tl.sum(updated * updated, axis=0) / hidden_size
@@ -142,7 +155,7 @@ def _indexed_gate_rms_norm_scale_shift_kernel(
     shift = tl.load(shift_ptr + index * stride_shift_row + columns, mask=mask, other=0.0).to(tl.float32)
     scale = tl.load(scale_ptr + index * stride_scale_row + columns, mask=mask, other=0.0).to(tl.float32)
     tl.store(
-        modulated_out_ptr + row * hidden_size + columns,
+        modulated_out_ptr + row * stride_modulated_out_row + columns,
         normalized * (1.0 + scale) + shift,
         mask=mask,
     )
@@ -155,7 +168,7 @@ def indexed_scale_shift_(
     indices: torch.Tensor,
 ) -> torch.Tensor:
     """Apply indexed scale/shift in-place to a disposable contiguous input."""
-    if x.is_cpu:
+    if not _can_use_triton(x, shift, scale, indices):
         x.copy_((x * (1.0 + scale.index_select(0, indices)) + shift.index_select(0, indices)).to(x.dtype))
         return x
     rows, hidden_size = x.shape
@@ -185,7 +198,7 @@ def indexed_gate(
     indices: torch.Tensor,
 ) -> torch.Tensor:
     """Return ``x + gate[indices] * other`` without indexed temporaries."""
-    if x.is_cpu:
+    if not _can_use_triton(x, gate, other, indices):
         return (x + gate.index_select(0, indices) * other).to(x.dtype)
     output = torch.empty_like(x)
     rows, hidden_size = x.shape
@@ -218,7 +231,7 @@ def rms_norm_indexed_scale_shift(
     eps: float,
 ) -> torch.Tensor:
     """Fuse H3 RMSNorm with its indexed AdaLN affine transform."""
-    if x.is_cpu:
+    if not _can_use_triton(x, weight, shift, scale, indices):
         input_dtype = x.dtype
         normalized = x.float()
         variance = normalized.pow(2).mean(-1, keepdim=True)
@@ -238,6 +251,7 @@ def rms_norm_indexed_scale_shift(
             hidden_size,
             eps,
             x.stride(0),
+            output.stride(0),
             shift.stride(0),
             scale.stride(0),
             indices.stride(0),
@@ -258,7 +272,7 @@ def indexed_gate_rms_norm_scale_shift(
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse gated residual, the following RMSNorm, and AdaLN affine."""
-    if residual.is_cpu:
+    if not _can_use_triton(residual, gate, branch, weight, shift, scale, indices):
         input_dtype = residual.dtype
         residual_out = (residual + gate.index_select(0, indices) * branch).to(input_dtype)
         normalized = residual_out.float()
@@ -286,6 +300,8 @@ def indexed_gate_rms_norm_scale_shift(
             hidden_size,
             eps,
             residual.stride(0),
+            residual_out.stride(0),
+            modulated_out.stride(0),
             gate.stride(0),
             branch.stride(0),
             shift.stride(0),

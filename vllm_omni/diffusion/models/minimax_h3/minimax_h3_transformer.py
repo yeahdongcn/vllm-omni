@@ -25,6 +25,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata, VideoTokenLayout
 from vllm_omni.diffusion.attention.layer import Attention
@@ -43,6 +44,7 @@ from vllm_omni.diffusion.layers.activation import SiluAndMul
 from vllm_omni.diffusion.layers.fused_qk_norm_rope import fused_qk_norm_rope
 from vllm_omni.diffusion.layers.norm import RMSNorm
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
+from vllm_omni.platforms import current_omni_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import (
@@ -746,6 +748,7 @@ class MiniMaxH3DiTBlock(nn.Module):
             modality_num=MINIMAX_H3_ADALN_MODALITY_NUM,
             prefix=f"{prefix}.adaln_proj",
         )
+        self.use_fused_modulation = HAS_TRITON and current_omni_platform.supports_minimax_h3_triton_modulation()
 
     def forward(
         self,
@@ -777,14 +780,18 @@ class MiniMaxH3DiTBlock(nn.Module):
         ) = self.adaln_proj(t_emb)
 
         residual = x
-        h = rms_norm_indexed_scale_shift(
-            x,
-            self.norm1.weight,
-            shift_msa,
-            scale_msa,
-            combined_indices,
-            self.norm1.variance_epsilon,
-        )
+        if self.use_fused_modulation:
+            h = rms_norm_indexed_scale_shift(
+                x,
+                self.norm1.weight,
+                shift_msa,
+                scale_msa,
+                combined_indices,
+                self.norm1.variance_epsilon,
+            )
+        else:
+            h = self.norm1(x)
+            h = indexed_scale_shift_(h, shift_msa, scale_msa, combined_indices)
         h = self.attn(
             h,
             rope_table=rope_table,
@@ -794,16 +801,21 @@ class MiniMaxH3DiTBlock(nn.Module):
             sp_seq_lens=sp_seq_lens,
             video_layout=video_layout,
         )
-        x, h = indexed_gate_rms_norm_scale_shift(
-            residual,
-            gate_msa,
-            h,
-            self.norm2.weight,
-            shift_mlp,
-            scale_mlp,
-            combined_indices,
-            self.norm2.variance_epsilon,
-        )
+        if self.use_fused_modulation:
+            x, h = indexed_gate_rms_norm_scale_shift(
+                residual,
+                gate_msa,
+                h,
+                self.norm2.weight,
+                shift_mlp,
+                scale_mlp,
+                combined_indices,
+                self.norm2.variance_epsilon,
+            )
+        else:
+            x = indexed_gate(residual, gate_msa, h, combined_indices)
+            h = self.norm2(x)
+            h = indexed_scale_shift_(h, shift_mlp, scale_mlp, combined_indices)
         residual = x
         h = self.mlp(h)
         return indexed_gate(residual, gate_mlp, h, combined_indices)
