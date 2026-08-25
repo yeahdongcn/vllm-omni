@@ -12,17 +12,12 @@ DIFFUSION_MODEL_INDEX_FILES = (
     "modular_model_index.json",
 )
 
-_NATIVE_DIFFUSION_MODEL_SIGNATURES = (
-    (
-        "sand-ai/MAGI-2-preview",
-        "Magi2Pipeline",
-        (
-            "preview/model.safetensors.index.json",
-            "text_encoder/config.json",
-            "vae/Wan2.2_VAE.pth",
-            "turbo_vae/checkpoint.ckpt",
-        ),
-    ),
+_MAGI2_MODEL_ID = "sand-ai/MAGI-2-preview"
+_MAGI2_REQUIRED_FILES = (
+    "preview/model.safetensors.index.json",
+    "text_encoder/config.json",
+    "vae/Wan2.2_VAE.pth",
+    "turbo_vae/checkpoint.ckpt",
 )
 
 
@@ -59,22 +54,24 @@ def _looks_like_bagel(model_name: str) -> bool:
         return False
 
 
-def resolve_native_diffusion_model_class(model_name: str) -> str | None:
-    """Resolve native checkpoints that have no root HF or Diffusers config."""
-
+def _looks_like_magi2(model_name: str) -> bool:
+    """Detect the official Hub ID or a complete local Preview checkpoint."""
     normalized = str(model_name).strip().rstrip("/")
     hub_prefix = "https://huggingface.co/"
     if normalized.lower().startswith(hub_prefix):
         normalized = normalized[len(hub_prefix) :]
         normalized = normalized.split("/tree/", 1)[0]
-    for model_id, pipeline_class, required_files in _NATIVE_DIFFUSION_MODEL_SIGNATURES:
-        if normalized.lower() == model_id.lower():
-            return pipeline_class
-        if os.path.isdir(normalized) and all(
-            os.path.isfile(os.path.join(normalized, *relative.split("/"))) for relative in required_files
-        ):
-            return pipeline_class
-    return None
+    if normalized.lower() == _MAGI2_MODEL_ID.lower():
+        return True
+    return os.path.isdir(normalized) and all(
+        os.path.isfile(os.path.join(normalized, *relative.split("/"))) for relative in _MAGI2_REQUIRED_FILES
+    )
+
+
+def resolve_native_diffusion_model_class(model_name: str) -> str | None:
+    """Resolve native checkpoints that have no root HF or Diffusers config."""
+
+    return "Magi2Pipeline" if _looks_like_magi2(model_name) else None
 
 
 def _looks_like_dreamzero(model_name: str) -> bool:

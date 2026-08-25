@@ -278,6 +278,9 @@ def _validate_source_metadata(
                 runtime_shape = source_shape
                 runtime_dtype = source_dtype
                 if binding.transform is not None:
+                    # Adapter transforms can map full checkpoint tensors to a
+                    # rank-local runtime shape. Validate that contract without
+                    # materializing the source tensor during preflight.
                     try:
                         transformed = binding.transform(
                             torch.empty(
