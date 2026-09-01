@@ -95,9 +95,6 @@ def test_hsdp_resolves_nested_ignored_module_and_preserves_mixed_dtypes(
 
     group = Group()
     monkeypatch.setattr(hsdp_module, "get_world_group", lambda: group)
-    monkeypatch.setattr(hsdp_module, "get_fs_group", lambda: group)
-    monkeypatch.setattr(hsdp_module, "get_fully_shard_world_size", lambda: 1)
-    monkeypatch.setattr(hsdp_module, "get_fully_shard_rank", lambda: 0)
     monkeypatch.setattr(
         hsdp_module,
         "_create_hsdp_mesh",
