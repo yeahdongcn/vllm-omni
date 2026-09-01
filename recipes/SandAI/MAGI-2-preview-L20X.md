@@ -108,8 +108,8 @@ must use separate worker processes rather than constructing multiple instances
 inside one process.
 
 MAGI-2 uses vLLM's bundled FlashAttention 3 kernels by default on Hopper
-(compute capability 9.x), FlashAttention 4 on supported Blackwell devices,
-and FlashAttention 2 on earlier architectures. Set
+(compute capability 9.x), FlashAttention 4 on supported Blackwell devices
+with FA3 as the fallback, and FlashAttention 2 on earlier architectures. Set
 `MAGI2_FLASH_ATTN_VERSION=2`, `3`, or `4` before worker startup to force an
 available kernel for diagnostics or output comparisons.
 
