@@ -662,6 +662,31 @@ def test_magi2_i2v_preserves_reference_geometry_for_model_preprocessing(test_cli
     assert input_image.size == (48, 32)
 
 
+def test_magi2_serving_applies_native_defaults_and_rejects_explicit_frame_mismatch():
+    engine = FakeAsyncOmni()
+    engine.model_class_name = "Magi2Pipeline"
+    handler = OmniOpenAIServingVideo.for_diffusion(
+        diffusion_engine=engine,
+        model_name="sand-ai/MAGI-2-preview",
+    )
+
+    asyncio.run(handler._run_and_extract(VideoGenerationRequest(prompt="A fox walks through snow"), "defaults"))
+
+    sampling = engine.captured_sampling_params_list[0]
+    assert (sampling.width, sampling.height) == (896, 512)
+    assert sampling.num_frames == 125
+    assert sampling.fps == sampling.frame_rate == 12.5
+    assert sampling.num_inference_steps == 100
+
+    with pytest.raises(HTTPException, match="requires 125 frames"):
+        asyncio.run(
+            handler._run_and_extract(
+                VideoGenerationRequest(prompt="A fox walks through snow", num_frames=1),
+                "bad-frames",
+            )
+        )
+
+
 def test_i2v_video_generation_with_image_reference_form(test_client, mocker: MockerFixture):
     mocker.patch(
         "vllm_omni.entrypoints.openai.serving_video._encode_video_bytes",

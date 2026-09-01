@@ -76,6 +76,7 @@ _RESOLUTION_PRESETS: dict[str, tuple[int, int]] = {
     "272p": (448, 256),
     "540p": (896, 512),
 }
+_PRESET_BY_SIZE = {size: name for name, size in _RESOLUTION_PRESETS.items()}
 
 _REQUIRED_CHECKPOINT_PATHS = (
     "preview/model.safetensors.index.json",
@@ -161,6 +162,52 @@ def _env_flag(value: object, *, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_native_resolution(sampling: object, extra: Mapping[str, object]) -> tuple[str, int, int]:
+    """Resolve MAGI-2 generation geometry from the shared sampling fields."""
+    resolution_value = extra.get("resolution")
+    resolution = None if resolution_value is None else str(resolution_value).lower()
+    if resolution is not None and resolution not in _RESOLUTION_PRESETS:
+        raise OmniClientError(
+            f"Unsupported native MAGI-2 resolution {resolution!r}; choose "
+            f"from {sorted(_RESOLUTION_PRESETS)}. The 1080p refiner is not "
+            "part of the Preview-only native PR."
+        )
+
+    requested_width = getattr(sampling, "width", None)
+    requested_height = getattr(sampling, "height", None)
+    if (requested_width is None) != (requested_height is None):
+        raise OmniClientError("MAGI-2 native width and height must be supplied together")
+
+    requested_size: tuple[int, int] | None = None
+    if requested_width is not None:
+        try:
+            requested_size = (int(requested_width), int(requested_height))
+        except (TypeError, ValueError) as exc:
+            raise OmniClientError("MAGI-2 native dimensions must be positive integers") from exc
+        if requested_size[0] <= 0 or requested_size[1] <= 0:
+            raise OmniClientError("MAGI-2 native dimensions must be positive integers")
+
+    if resolution is None:
+        if requested_size is None:
+            resolution = "540p"
+        else:
+            resolution = _PRESET_BY_SIZE.get(requested_size)
+            if resolution is None:
+                raise OmniClientError(
+                    f"Unsupported native MAGI-2 size {requested_size[0]}x{requested_size[1]}; "
+                    f"choose from {sorted(_PRESET_BY_SIZE)} or use output_width/output_height for final resizing."
+                )
+    elif requested_size is not None and requested_size != _RESOLUTION_PRESETS[resolution]:
+        expected_width, expected_height = _RESOLUTION_PRESETS[resolution]
+        raise OmniClientError(
+            f"MAGI-2 resolution {resolution!r} requires {expected_width}x{expected_height}; "
+            f"got {requested_size[0]}x{requested_size[1]}."
+        )
+
+    width, height = _RESOLUTION_PRESETS[resolution]
+    return resolution, width, height
 
 
 def _resolve_checkpoint_root(model: str, revision: str | None) -> str:
@@ -450,7 +497,12 @@ class Magi2Pipeline(
     SupportImageInput,
     SupportAudioOutput,
 ):
-    """Native MAGI-2 Preview text/image-to-video-and-audio pipeline."""
+    """Native MAGI-2 Preview text/image-to-video-and-audio pipeline.
+
+    One pipeline instance is supported per worker process. Initialization sets
+    process-wide deterministic state, so tests or deployments that need more
+    than one pipeline must isolate them in separate worker processes.
+    """
 
     support_image_input: ClassVar[bool] = True
     support_audio_output: ClassVar[bool] = True
@@ -946,18 +998,11 @@ class Magi2Pipeline(
             image_value = extra.get("image_path")
         image = _single_image(image_value)
 
-        resolution = str(extra.get("resolution", "540p")).lower()
-        if resolution not in _RESOLUTION_PRESETS:
-            raise OmniClientError(
-                f"Unsupported native MAGI-2 resolution {resolution!r}; choose "
-                f"from {sorted(_RESOLUTION_PRESETS)}. The 1080p refiner is not "
-                "part of the Preview-only native PR."
-            )
+        _, width, height = _resolve_native_resolution(sampling, extra)
         if _env_flag(extra.get("use_refiner")):
             raise OmniClientError(
                 "The MAGI-2 1080p refiner is a separate model and is not yet enabled by the native Preview pipeline."
             )
-        width, height = _RESOLUTION_PRESETS[resolution]
         seconds = float(extra.get("seconds", extra.get("duration", 10.0)))
         if not math.isfinite(seconds) or seconds != 10.0:
             raise OmniClientError("MAGI-2 Preview supports 10-second clips only")
@@ -970,16 +1015,18 @@ class Magi2Pipeline(
         if requested_fps is not None and float(requested_fps) != 12.5:
             raise OmniClientError(f"MAGI-2 Preview output is fixed at 12.5 fps; got {requested_fps}.")
         requested_frames = getattr(sampling, "num_frames", None)
-        api_derived_frames = int(seconds * float(requested_fps or 24))
-        if requested_frames not in {None, 1, 125, api_derived_frames}:
+        # ``1`` is the shared image-model engine default and therefore means
+        # unset here. Serving validates an explicitly supplied frame count
+        # before applying MAGI-2's model-owned default.
+        if requested_frames not in {None, 1, 125}:
             raise OmniClientError(f"MAGI-2 Preview output is fixed at 125 frames; got {requested_frames}.")
         requested_steps = sampling.num_inference_steps
         steps = MAGI2_GENERATION_CONFIG.preview_steps if requested_steps is None else int(requested_steps)
         if steps <= 0:
             raise OmniClientError("MAGI-2 inference steps must be positive")
 
-        output_width = extra.get("output_width", sampling.width)
-        output_height = extra.get("output_height", sampling.height)
+        output_width = extra.get("output_width")
+        output_height = extra.get("output_height")
         if (output_width is None) != (output_height is None):
             raise OmniClientError("MAGI-2 output resize requires output_width and output_height")
         if output_width is not None:
@@ -1003,11 +1050,13 @@ class Magi2Pipeline(
         has_cuda = torch.cuda.is_available()
         device_index = torch.accelerator.current_device_index() if has_cuda else None
         monitor = _PeakReservedMonitor(device_index) if device_index is not None else None
-        if monitor is not None:
-            monitor.start()
-            torch.accelerator.synchronize()
-        started = time.perf_counter()
+        monitor_started = False
         try:
+            if monitor is not None:
+                monitor.start()
+                monitor_started = True
+                torch.accelerator.synchronize()
+            started = time.perf_counter()
             video, audio = self._evaluate_preview(
                 prompt=prompt,
                 image=image,
@@ -1018,7 +1067,7 @@ class Magi2Pipeline(
             if has_cuda:
                 torch.accelerator.synchronize()
         finally:
-            if monitor is not None:
+            if monitor_started:
                 monitor.stop()
         elapsed = time.perf_counter() - started
 

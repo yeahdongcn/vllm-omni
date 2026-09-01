@@ -516,6 +516,28 @@ class SimplePackedData:
         return torch.stack(videos, dim=0), torch.stack(audios, dim=0)
 
 
+@dataclass(frozen=True)
+class PackedModelInput:
+    """Request-owned packed transformer arguments and output layout."""
+
+    token_sequence: torch.Tensor
+    coords_mapping: torch.Tensor
+    modality_mapping: torch.Tensor
+    varlen_handler: VarlenHandler
+    time_token_sequence: torch.Tensor
+    output_layout: SimplePackedData
+
+    @property
+    def model_args(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, VarlenHandler, torch.Tensor]:
+        return (
+            self.token_sequence,
+            self.coords_mapping,
+            self.modality_mapping,
+            self.varlen_handler,
+            self.time_token_sequence,
+        )
+
+
 class Magi2DataProxy:
     """Convert dense modality tensors to/from the transformer's packed ABI."""
 
@@ -523,7 +545,6 @@ class Magi2DataProxy:
         self.config = config or Magi2PreviewDataProxyConfig()
         self.patch_size = self.config.patch_size
         self.t_patch_size = self.config.t_patch_size
-        self._packed_for_output: SimplePackedData | None = None
 
     def img2tokens(self, x_t: torch.Tensor) -> torch.Tensor:
         return _patchify_3d(x_t, self.t_patch_size, self.patch_size)
@@ -561,7 +582,7 @@ class Magi2DataProxy:
     def process_input(
         self,
         data: ModelInput,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, VarlenHandler, torch.Tensor]:
+    ) -> PackedModelInput:
         self._validate_batch(data)
         batch_size, _, video_t, video_h, video_w = data.x_t.shape
         video_tokens = self.img2tokens(data.x_t)
@@ -633,19 +654,21 @@ class Magi2DataProxy:
             max_seqlen_q=packed.max_seqlen,
             max_seqlen_k=packed.max_seqlen,
         )
-        self._packed_for_output = packed
-        return (
-            packed.token_sequence,
-            packed.coords_mapping,
-            packed.modality_mapping,
-            varlen_handler,
-            packed.time_token_sequence,
+        return PackedModelInput(
+            token_sequence=packed.token_sequence,
+            coords_mapping=packed.coords_mapping,
+            modality_mapping=packed.modality_mapping,
+            varlen_handler=varlen_handler,
+            time_token_sequence=packed.time_token_sequence,
+            output_layout=packed,
         )
 
-    def process_output(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if self._packed_for_output is None:
-            raise RuntimeError("process_input must be called before process_output")
-        return self._packed_for_output.depack_token_sequence(x)
+    @staticmethod
+    def process_output(
+        x: torch.Tensor,
+        output_layout: SimplePackedData,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return output_layout.depack_token_sequence(x)
 
 
 __all__ = [
@@ -653,6 +676,7 @@ __all__ = [
     "Magi2PreviewDataProxyConfig",
     "Modality",
     "ModelInput",
+    "PackedModelInput",
     "SimplePackedData",
     "SingleData",
     "VarlenHandler",

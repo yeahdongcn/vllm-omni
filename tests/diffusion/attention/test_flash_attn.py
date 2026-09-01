@@ -37,7 +37,7 @@ flash_attn_func = fa.flash_attn_func  # noqa: N813
         (10, None, frozenset((2, 3, 4)), 4),
         (12, None, frozenset((2, 3, 4)), 4),
         (9, None, frozenset((2,)), 2),
-        (10, None, frozenset((2, 3)), 2),
+        (10, None, frozenset((2, 3)), 3),
         (9, "2", frozenset((2, 3, 4)), 2),
         (9, "4", frozenset((2, 3, 4)), 4),
     ],

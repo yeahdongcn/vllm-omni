@@ -19,6 +19,11 @@ from vllm_omni.diffusion.models.magi2.modeling_magi2 import (
     Magi2PreviewTransformer,
     Modality,
 )
+from vllm_omni.diffusion.models.magi2.preview_data_proxy import (
+    Magi2DataProxy,
+    Magi2PreviewDataProxyConfig,
+    ModelInput,
+)
 
 
 def _tiny_config(
@@ -79,6 +84,30 @@ def test_hsdp_policy_shards_individual_preview_layers():
     assert condition("block.layers.1", model.block.layers[1])
     assert not condition("block", model.block)
     assert not condition("pre_adapter", model.pre_adapter)
+
+
+def test_data_proxy_keeps_output_layout_request_scoped() -> None:
+    proxy = Magi2DataProxy(Magi2PreviewDataProxyConfig(time_channel_dim=0))
+
+    def make_input(width: int) -> ModelInput:
+        return ModelInput(
+            x_t=torch.arange(2 * width, dtype=torch.float32).reshape(1, 2, 1, 1, width),
+            audio_x_t=torch.zeros(1, 1, 2),
+            audio_feat_len=torch.tensor([1]),
+            txt_feat=torch.zeros(1, 1, 2),
+            txt_feat_len=torch.tensor([1]),
+            t=torch.tensor([0.5]),
+        )
+
+    first = proxy.process_input(make_input(2))
+    second = proxy.process_input(make_input(3))
+
+    first_video, first_audio = proxy.process_output(first.token_sequence, first.output_layout)
+    second_video, second_audio = proxy.process_output(second.token_sequence, second.output_layout)
+
+    assert first_video.shape == (1, 2, 1, 1, 2)
+    assert second_video.shape == (1, 2, 1, 1, 3)
+    assert first_audio.shape == second_audio.shape == (1, 1, 2)
 
 
 def test_tiny_native_preview_runs_through_nested_cachedit_adapter() -> None:

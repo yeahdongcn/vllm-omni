@@ -137,7 +137,7 @@ def _choose_vllm_flash_attn_version(
 
     if device_major >= 10 and 4 in supported_versions:
         return 4
-    if device_major == 9 and 3 in supported_versions:
+    if device_major >= 9 and 3 in supported_versions:
         return 3
     if 2 in supported_versions:
         return 2

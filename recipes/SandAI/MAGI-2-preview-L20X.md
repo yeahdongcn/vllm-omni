@@ -102,6 +102,11 @@ No H100, H200, B200, or B300 runtime claim is made here.
 Set `MAGI2_DETERMINISTIC=1` before worker startup when deterministic kernels
 are required. The setting is fixed for the worker lifetime.
 
+Each worker process supports one MAGI-2 pipeline instance. Pipeline startup
+sets process-wide deterministic state, so multi-pipeline tests and deployments
+must use separate worker processes rather than constructing multiple instances
+inside one process.
+
 MAGI-2 uses vLLM's bundled FlashAttention 3 kernels by default on Hopper
 (compute capability 9.x), FlashAttention 4 on supported Blackwell devices,
 and FlashAttention 2 on earlier architectures. Set

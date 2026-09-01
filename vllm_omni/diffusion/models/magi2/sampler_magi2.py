@@ -140,10 +140,10 @@ class Magi2PreviewSampler(CFGParallelMixin):
     @torch.inference_mode()
     def forward(self, model_input: ModelInput) -> tuple[torch.Tensor, torch.Tensor]:
         packed_input = self.data_proxy.process_input(model_input)
-        model_output = self.model(*packed_input)
+        model_output = self.model(*packed_input.model_args)
         if not isinstance(model_output, torch.Tensor):
             raise TypeError(f"MAGI-2 preview transformer must return a tensor, got {type(model_output)!r}")
-        return self.data_proxy.process_output(model_output)
+        return self.data_proxy.process_output(model_output, packed_input.output_layout)
 
     def predict_noise(self, model_input: ModelInput) -> tuple[torch.Tensor, torch.Tensor]:
         """Run one conditional or unconditional branch for shared CFG dispatch."""

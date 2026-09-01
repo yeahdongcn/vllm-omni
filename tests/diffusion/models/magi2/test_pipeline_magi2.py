@@ -197,9 +197,10 @@ def test_forward_maps_272p_i2v_and_output_resize(monkeypatch):
     result = pipe(
         _request(
             prompt,
+            width=448,
+            height=256,
             num_inference_steps=1,
             extra_args={
-                "resolution": "272p",
                 "output_width": 6,
                 "output_height": 4,
             },
@@ -214,6 +215,25 @@ def test_forward_maps_272p_i2v_and_output_resize(monkeypatch):
     assert (call["width"], call["height"]) == (448, 256)
     assert call["num_inference_steps"] == 1
     assert result.output["payload"]["video"].shape == (2, 4, 6, 3)
+
+
+def test_forward_rejects_conflicting_resolution_and_sampling_geometry(monkeypatch):
+    pipe, runtime = _pipeline()
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.models.magi2.pipeline_magi2.current_omni_platform.is_available",
+        lambda: False,
+    )
+
+    with pytest.raises(OmniClientError, match="requires 896x512"):
+        pipe(
+            _request(
+                "A fox walks through snow",
+                width=448,
+                height=256,
+                extra_args={"resolution": "540p"},
+            )
+        )
+    assert not runtime.calls
 
 
 @pytest.mark.parametrize(
@@ -246,6 +266,32 @@ def test_forward_rejects_zero_inference_steps_before_generation(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(OmniClientError, match="inference steps must be positive"):
         pipe(_request("prompt", num_inference_steps=0))
+    assert not runtime.calls
+
+
+def test_forward_stops_peak_monitor_when_initial_synchronize_fails(monkeypatch):
+    pipe, runtime = _pipeline()
+    monitor = Mock(peak_bytes=0)
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.models.magi2.pipeline_magi2.current_omni_platform.is_cuda",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.models.magi2.pipeline_magi2.current_omni_platform.is_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    monkeypatch.setattr(torch.accelerator, "synchronize", Mock(side_effect=RuntimeError("sync failed")))
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.models.magi2.pipeline_magi2._PeakReservedMonitor",
+        Mock(return_value=monitor),
+    )
+
+    with pytest.raises(RuntimeError, match="sync failed"):
+        pipe(_request("A fox walks through snow"))
+
+    monitor.start.assert_called_once_with()
+    monitor.stop.assert_called_once_with()
     assert not runtime.calls
 
 
