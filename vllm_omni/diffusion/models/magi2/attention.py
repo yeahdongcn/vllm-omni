@@ -47,6 +47,60 @@ def _resolve_flash_attn_version() -> int:
     return version
 
 
+def _musa_mate_flash_attn_varlen(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softcap: float,
+    sink: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Run MATE FlashAttention-3 when the installed build exposes it.
+
+    MATE's varlen kernel natively handles the single learned sink used by
+    MAGI-2.  Returning ``None`` is an intentional fail-soft path for images
+    built without the optional extension; the caller then uses the chunked
+    Torch oracle instead of failing during import.
+    """
+    if os.environ.get("MAGI2_USE_MATE_FA", "1") == "0":
+        return None
+    if sink is not None and sink.shape[0] != 1:
+        logger.warning("MATE FA sink adapter supports one sink token; using chunked Torch fallback")
+        return None
+    try:
+        from flash_attn_3.interface import flash_attn_varlen_func
+    except (ImportError, ModuleNotFoundError):
+        try:
+            from flash_attn_interface import flash_attn_varlen_func
+        except (ImportError, ModuleNotFoundError):
+            return None
+    sinks = None if sink is None else sink[0].to(device=q.device, dtype=q.dtype).contiguous()
+    result = flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=q.shape[-1] ** -0.5,
+        causal=False,
+        softcap=max(0.0, softcap),
+        deterministic=os.environ.get("MAGI2_DETERMINISTIC", "0") == "1",
+        return_softmax_lse=False,
+        sinks=sinks,
+    )
+    if isinstance(result, tuple):
+        result = result[0]
+    if not isinstance(result, torch.Tensor):
+        raise TypeError(f"MATE FlashAttention returned unsupported type {type(result)!r}")
+    return result
+
+
 @dataclass(frozen=True)
 class VarlenHandler:
     """Packed-sequence metadata consumed by MAGI-2 attention."""
@@ -223,6 +277,24 @@ def packed_attention_with_sink(
             fa_version=_resolve_flash_attn_version(),
         )
         return correct_out_lse_with_sink(out, lse, sink)[0]
+    if current_omni_platform.is_musa():
+        try:
+            mate_out = _musa_mate_flash_attn_varlen(
+                q,
+                k,
+                v,
+                cu_seqlens_q=cu_q,
+                cu_seqlens_k=cu_k,
+                max_seqlen_q=max_q,
+                max_seqlen_k=max_k,
+                softcap=softcap,
+                sink=sink,
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("MATE MAGI-2 attention failed; falling back to chunked Torch attention: %s", exc)
+            mate_out = None
+        if mate_out is not None:
+            return mate_out
     return torch_varlen_attention_with_sink(
         q,
         k,
