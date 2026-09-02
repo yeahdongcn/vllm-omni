@@ -277,7 +277,8 @@ def packed_attention_with_sink(
             fa_version=_resolve_flash_attn_version(),
         )
         return correct_out_lse_with_sink(out, lse, sink)[0]
-    if current_omni_platform.is_musa():
+    is_musa_tensor = bool(getattr(q, "is_musa", False)) or q.device.type == "musa"
+    if current_omni_platform.is_musa() and is_musa_tensor:
         try:
             mate_out = _musa_mate_flash_attn_varlen(
                 q,
