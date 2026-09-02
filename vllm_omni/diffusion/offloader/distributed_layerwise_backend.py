@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Distributed Layerwise Offload backend with double-buffered H2D.
 
 This module implements the RFC-1 "Distributed Layerwise Offload" mechanism that:
