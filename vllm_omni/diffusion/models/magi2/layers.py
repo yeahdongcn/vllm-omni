@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 # Copyright (c) 2026 SandAI. All Rights Reserved.
 
 """Checkpoint-compatible native layers for MAGI-2 Preview.
 
 The grouped-linear, normalization, Fourier, and mHC formulas are adapted from
 SandAI's Apache-2.0 preview implementation.  They have been modified to remove
-MagiCompiler and external Triton runtime dependencies.  The shared SwiGLU7
-activation is reused from vLLM-Omni's native MagiHuman implementation because
-the two released models use the same GPT-OSS-style clamped activation.
+MagiCompiler and external Triton runtime dependencies.
 """
 
 from __future__ import annotations
@@ -21,9 +19,23 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm_omni.diffusion.models.magi_human.magi_human_dit import swiglu7
-
 from .parallel import Magi2ParallelGroup, get_magi2_tp_group
+
+
+def swiglu7(
+    x: torch.Tensor,
+    alpha: float = 1.702,
+    limit: float = 7.0,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Released GPT-OSS-style clamped SwiGLU activation."""
+
+    out_dtype = x.dtype if out_dtype is None else out_dtype
+    x = x.to(torch.float32)
+    gate, linear = x[..., ::2], x[..., 1::2]
+    gate = gate.clamp(max=limit)
+    linear = linear.clamp(min=-limit, max=limit)
+    return (gate * torch.sigmoid(alpha * gate) * (linear + 1.0)).to(out_dtype)
 
 
 class ModalityDispatcher:

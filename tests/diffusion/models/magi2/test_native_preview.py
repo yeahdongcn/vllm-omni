@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 from __future__ import annotations
 
 import cache_dit
+import pytest
 import torch
 
 from vllm_omni.diffusion.cache.cachedit.model_specific import enable_cache_for_magi2
@@ -24,6 +26,8 @@ from vllm_omni.diffusion.models.magi2.preview_data_proxy import (
     Magi2PreviewDataProxyConfig,
     ModelInput,
 )
+
+pytestmark = [pytest.mark.diffusion, pytest.mark.cpu, pytest.mark.core_model]
 
 
 def _tiny_config(

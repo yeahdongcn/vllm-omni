@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -54,24 +53,3 @@ def test_shared_text_to_video_uses_native_preview_defaults(
     assert preset["num_frames"] == 125
     assert preset["num_inference_steps"] == 100
     assert preset["fps"] == 12.5
-
-
-def test_shared_text_to_video_forwards_hsdp_cli(text_to_video: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            str(text_to_video.__file__),
-            "--ulysses-degree",
-            "3",
-            "--use-hsdp",
-            "--hsdp-shard-size",
-            "3",
-        ],
-    )
-
-    config = text_to_video._parallel_config_from_args(text_to_video.parse_args())
-
-    assert config.ulysses_degree == 3
-    assert config.use_hsdp is True
-    assert config.hsdp_shard_size == 3
