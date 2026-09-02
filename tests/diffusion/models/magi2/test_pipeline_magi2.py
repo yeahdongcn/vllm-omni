@@ -37,6 +37,11 @@ from vllm_omni.model_extras.registry import (
 pytestmark = [pytest.mark.diffusion, pytest.mark.cpu, pytest.mark.core_model]
 
 
+def test_profiler_exposes_real_magi2_denoise_step() -> None:
+    assert hasattr(Magi2PreviewSampler, "denoise_step")
+    assert "sampler.denoise_step" in Magi2Pipeline._PROFILER_TARGETS
+
+
 @dataclass
 class _SamplingStub:
     width: int | None = None

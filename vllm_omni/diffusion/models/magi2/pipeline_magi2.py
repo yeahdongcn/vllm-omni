@@ -511,6 +511,16 @@ class Magi2Pipeline(
     SupportImageInput,
     SupportAudioOutput,
 ):
+    _PROFILER_TARGETS = (
+        "_encode_prompts",
+        "_encode_reference_image",
+        "_pool_figure_token",
+        "sampler.sample",
+        "sampler.denoise_step",
+        "_decode_video",
+        "_decode_audio",
+    )
+
     """Native MAGI-2 Preview text/image-to-video-and-audio pipeline.
 
     One pipeline instance is supported per worker process. Initialization sets
@@ -692,18 +702,7 @@ class Magi2Pipeline(
             )
         ]
         self.setup_diffusion_pipeline_profiler(
-            profiler_targets=[
-                "_encode_prompts",
-                "_encode_reference_image",
-                "_pool_figure_token",
-                "sampler.sample",
-                # Keep each denoise invocation separately visible in the
-                # profiler log (`...denoise_step.diffuse took ...`) so the
-                # single-step metric is not inferred from an E2E average.
-                "denoise_step",
-                "_decode_video",
-                "_decode_audio",
-            ],
+            profiler_targets=list(self._PROFILER_TARGETS),
             enable_diffusion_pipeline_profiler=bool(getattr(od_config, "enable_diffusion_pipeline_profiler", False)),
         )
 
