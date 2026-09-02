@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 # Copyright (c) 2025-2026 SandAI. All Rights Reserved.
 
 """Native multi-head MoE used by MAGI-2 Preview.
@@ -21,8 +21,9 @@ from typing import Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import triton
-import triton.language as tl
+from vllm.triton_utils import tl, triton
+
+from vllm_omni.platforms import current_omni_platform
 
 from .parallel import Magi2ParallelGroup, ep_dispatch, ep_undispatch, get_magi2_ep_group
 
@@ -288,8 +289,8 @@ def _deterministic_scatter(
 def _select_block_config() -> tuple[int, int, int, int, int]:
     """Return the reference kernel config, capped for pre-Blackwell GPUs."""
 
-    major, _ = torch.cuda.get_device_capability()
-    if major >= 10:  # Blackwell
+    capability = current_omni_platform.get_device_capability()
+    if capability is not None and capability.major >= 10:  # Blackwell
         return (128, 64, 32, 2, 8)
     # BLOCK_T=128 needs 122,880 bytes of shared memory and is not safe on the
     # qualified L20X path.  This is the reference kernel's portable config.
@@ -491,7 +492,10 @@ class Magi2MultiHeadMoE(nn.Module):
     def _local_forward(self, x_heads: torch.Tensor) -> torch.Tensor:
         probabilities, indices = self._route(x_heads)
         gather_ids, sorted_probs, offsets = global_sort_routes(probabilities, indices, self.num_experts)
-        if x_heads.is_cuda:
+        # The Triton kernel is currently qualified only on CUDA. Keep MUSA on
+        # the numerically equivalent Torch path until a MUSA Triton launch is
+        # explicitly enabled and benchmarked.
+        if x_heads.device.type == "cuda":
             return triton_mh_moe_forward(
                 x_heads,
                 gather_ids,

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 # Copyright (c) 2026 SandAI. All Rights Reserved.
 
 """Native vLLM-Omni pipeline for ``sand-ai/MAGI-2-preview``.
@@ -49,6 +49,7 @@ from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import (
 )
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 from vllm_omni.errors import OmniClientError
+from vllm_omni.platforms import current_omni_platform
 
 from .audio_decoder import Magi2AudioDecoder
 from .conditioning import Magi2Qwen35TextEncoder
@@ -117,15 +118,24 @@ DEFAULT_NEGATIVE_PROMPT += (
 class _PeakReservedMonitor:
     def __init__(self, device: int) -> None:
         self.device = device
-        self.peak_bytes = torch.cuda.memory_reserved(device)
+        self.peak_bytes = self._memory_reserved()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _memory_reserved(self) -> int:
+        try:
+            return int(torch.accelerator.memory_reserved(self.device))
+        except (AttributeError, RuntimeError, NotImplementedError):
+            # Some accelerator builds expose synchronization but not a
+            # reserved-memory counter. Monitoring is diagnostic only and must
+            # not block a correctness run on those platforms.
+            return 0
 
     def _run(self) -> None:
         while not self._stop.is_set():
             self.peak_bytes = max(
                 self.peak_bytes,
-                torch.cuda.memory_reserved(self.device),
+                self._memory_reserved(),
             )
             self._stop.wait(0.05)
 
@@ -137,7 +147,7 @@ class _PeakReservedMonitor:
         self._thread.join()
         self.peak_bytes = max(
             self.peak_bytes,
-            torch.cuda.memory_reserved(self.device),
+            self._memory_reserved(),
         )
 
 
@@ -224,13 +234,13 @@ def _resolve_checkpoint_root(model: str, revision: str | None) -> str:
                 "MAGI-2 expects a local checkpoint directory or the official "
                 f"model ID {MAGI2_MODEL_ID!r}; got {model!r}."
             )
-        from huggingface_hub import snapshot_download
+        from vllm.transformers_utils.repo_utils import hf_api
 
         pinned_revision = revision or MAGI2_MODEL_REVISION
         logger.warning(
             "Resolving the pinned MAGI-2 snapshot from Hugging Face. Pre-download it for predictable startup."
         )
-        root = Path(snapshot_download(repo_id=normalized, revision=pinned_revision)).resolve()
+        root = Path(hf_api().snapshot_download(repo_id=normalized, revision=pinned_revision)).resolve()
 
     missing = [relative for relative in _REQUIRED_CHECKPOINT_PATHS if not (root / relative).is_file()]
     if missing:
@@ -369,8 +379,12 @@ def _seed_request(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed % (2**32))
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    if current_omni_platform.is_musa():
+        # torch.cuda intentionally reports false on MUSA; use the platform
+        # hook when available so each worker's accelerator RNG is seeded.
+        manual_seed_all = getattr(current_omni_platform, "manual_seed_all", None)
+        if manual_seed_all is not None:
+            manual_seed_all(seed)
 
 
 def _resolve_request_seed(sampling: object) -> int:
@@ -543,12 +557,15 @@ class Magi2Pipeline(
         if not od_config.model:
             raise ValueError("MAGI-2 requires od_config.model")
         _validate_native_topology(od_config)
-        if not torch.cuda.is_available():
-            raise RuntimeError("MAGI-2 Preview requires CUDA GPUs")
+        if not (
+            (current_omni_platform.is_cuda() or current_omni_platform.is_musa())
+            and current_omni_platform.is_available()
+        ):
+            raise RuntimeError("MAGI-2 Preview requires a CUDA or MUSA accelerator")
 
         self.od_config = od_config
         self.dtype = od_config.dtype or torch.bfloat16
-        self.device_str = f"cuda:{torch.accelerator.current_device_index()}"
+        self.device_str = f"{current_omni_platform.device_type}:{torch.accelerator.current_device_index()}"
         self.checkpoint_root = _resolve_checkpoint_root(
             str(od_config.model),
             od_config.revision,
@@ -1047,8 +1064,11 @@ class Magi2Pipeline(
         seed = _resolve_request_seed(sampling)
         _seed_request(seed)
 
-        has_cuda = torch.cuda.is_available()
-        device_index = torch.accelerator.current_device_index() if has_cuda else None
+        has_accelerator = (
+            (current_omni_platform.is_cuda() or current_omni_platform.is_musa())
+            and current_omni_platform.is_available()
+        )
+        device_index = torch.accelerator.current_device_index() if has_accelerator else None
         monitor = _PeakReservedMonitor(device_index) if device_index is not None else None
         monitor_started = False
         try:
@@ -1064,7 +1084,7 @@ class Magi2Pipeline(
                 height=height,
                 num_inference_steps=steps,
             )
-            if has_cuda:
+            if has_accelerator:
                 torch.accelerator.synchronize()
         finally:
             if monitor_started:
@@ -1075,7 +1095,7 @@ class Magi2Pipeline(
             video = _resize_video(video, output_width, output_height)
 
         peak_memory_mb = monitor.peak_bytes / 1024**2 if monitor is not None else 0.0
-        if has_cuda and dist.is_available() and dist.is_initialized() and self._parallel_group.world_size > 1:
+        if has_accelerator and dist.is_available() and dist.is_initialized() and self._parallel_group.world_size > 1:
             peak = torch.tensor(peak_memory_mb, device=self.device_str)
             dist.all_reduce(
                 peak,

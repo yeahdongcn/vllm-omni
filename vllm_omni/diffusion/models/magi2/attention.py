@@ -192,7 +192,10 @@ def packed_attention_with_sink(
     cu_q, cu_k, max_q, max_k = varlen.resolved(q.shape[0], k.shape[0])
     cu_q = cu_q.to(device=q.device, dtype=torch.int32).contiguous()
     cu_k = cu_k.to(device=q.device, dtype=torch.int32).contiguous()
-    if q.is_cuda:
+    # The bundled vLLM FlashAttention extension is CUDA-only. MUSA keeps the
+    # exact Torch reference path until a MATE/FA3 adapter is explicitly
+    # selected and validated on the target runtime.
+    if q.device.type == "cuda":
         out, lse = vllm_flash_attn_varlen_with_lse(
             q,
             k,
