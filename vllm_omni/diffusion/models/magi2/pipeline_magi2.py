@@ -697,6 +697,10 @@ class Magi2Pipeline(
                 "_encode_reference_image",
                 "_pool_figure_token",
                 "sampler.sample",
+                # Keep each denoise invocation separately visible in the
+                # profiler log (`...denoise_step.diffuse took ...`) so the
+                # single-step metric is not inferred from an E2E average.
+                "denoise_step",
                 "_decode_video",
                 "_decode_audio",
             ],
