@@ -25,6 +25,7 @@ from vllm_omni.diffusion.attention.backends.utils.fa import (
     resolve_vllm_flash_attn_version,
     vllm_flash_attn_varlen_with_lse,
 )
+from vllm_omni.platforms import current_omni_platform
 
 from .parallel import (
     Magi2ParallelGroup,
@@ -195,7 +196,7 @@ def packed_attention_with_sink(
     # The bundled vLLM FlashAttention extension is CUDA-only. MUSA keeps the
     # exact Torch reference path until a MATE/FA3 adapter is explicitly
     # selected and validated on the target runtime.
-    if q.device.type == "cuda":
+    if current_omni_platform.is_cuda() and q.device.type == "cuda":
         out, lse = vllm_flash_attn_varlen_with_lse(
             q,
             k,

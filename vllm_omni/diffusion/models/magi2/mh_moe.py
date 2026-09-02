@@ -21,6 +21,8 @@ from typing import Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from vllm_omni.platforms import current_omni_platform
 from vllm.triton_utils import tl, triton
 
 from vllm_omni.platforms import current_omni_platform
@@ -495,7 +497,7 @@ class Magi2MultiHeadMoE(nn.Module):
         # The Triton kernel is currently qualified only on CUDA. Keep MUSA on
         # the numerically equivalent Torch path until a MUSA Triton launch is
         # explicitly enabled and benchmarked.
-        if x_heads.device.type == "cuda":
+        if current_omni_platform.is_cuda() and x_heads.device.type == "cuda":
             return triton_mh_moe_forward(
                 x_heads,
                 gather_ids,
