@@ -23,6 +23,16 @@ MAGI2_EXTRA_BODY_PARAMS = frozenset(
 MAGI2_EXTRA_OUTPUT_PARAMS = frozenset()
 
 
+def magi2_preserves_reference_image_size(
+    *,
+    model: str | None,
+    revision: str | None = None,
+) -> bool:
+    """MAGI-2 owns checkpoint-aligned reference resize and padding."""
+    del model, revision
+    return True
+
+
 def get_magi2_video_generation_defaults(
     extra_body: Mapping[str, Any] | None = None,
 ) -> VideoGenerationDefaults:
