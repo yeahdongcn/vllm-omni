@@ -46,6 +46,7 @@ def _try_extract_layer_index(prefix: str) -> int | None:
 
 class Attention(nn.Module):
     _scheduler_paged_kv = False
+    _has_custom_attention = False
 
     def __init__(
         self,
@@ -70,23 +71,21 @@ class Attention(nn.Module):
         # perf for this layer (e.g. Wan2.2 cross-attn has short sequences and
         # block-FP8 quant offers no win). Default False = follow global config.
         disable_kv_quant: bool = False,
-        # Model-owned kernel for architectures whose attention contract cannot
-        # be represented by the generic backend interface (for example packed
-        # varlen attention with learned sink logits). The shared Attention
-        # layer still owns compile boundaries while the model kernel owns its
-        # specialized communication.
-        custom_attention: nn.Module | None = None,
         # Opt-in marker for Scheduler-managed paged KV. Unmarked diffusion
         # attention remains dense and contributes no native KVCacheSpec.
         paged_kv_cache_role: str | None = None,
         paged_kv_cache_dtype: torch.dtype | None = None,
+        # Model-owned kernel for architectures whose attention contract cannot
+        # be represented by the generic backend interface (for example packed
+        # varlen attention with learned sink logits). The shared Attention
+        # layer still owns parallel dispatch and compile boundaries.
+        custom_attention: nn.Module | None = None,
     ):
         super().__init__()
 
         self.role = role
         self.role_category = role_category
         self.qkv_layout = qkv_layout
-        self._has_custom_attention = custom_attention is not None
         # ``prefix`` is also the stable layer identity used by vLLM's native
         # KV-cache metadata.  Keep it on the Omni layer so the active paged
         # adapter can dispatch the already-resharded Q/K/V to the matching
@@ -99,6 +98,8 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.head_size = head_size
+
+        self._has_custom_attention = custom_attention is not None
 
         # Resolve backend via role-aware config.
         # The global diffusion config is set during model init via
@@ -114,6 +115,12 @@ class Attention(nn.Module):
         model_class_name = getattr(config, "model_class_name", None) if config is not None else None
         allow_trtllm_default = get_diffusion_model_metadata(model_class_name).attention_mask_free
 
+        scheduler_paged_kv = (
+            config is not None
+            and getattr(config, "diffusion_kv_mode", DiffusionKVCacheMode.DENSE_LEGACY)
+            is DiffusionKVCacheMode.PAGED_SCHEDULER
+        )
+        self._scheduler_paged_kv = scheduler_paged_kv
         if custom_attention is None:
             attn_backend_cls, spec = get_attn_backend_for_role(
                 role=role,
@@ -122,12 +129,6 @@ class Attention(nn.Module):
                 role_category=role_category,
                 allow_trtllm_default=allow_trtllm_default,
             )
-            scheduler_paged_kv = (
-                config is not None
-                and getattr(config, "diffusion_kv_mode", DiffusionKVCacheMode.DENSE_LEGACY)
-                is DiffusionKVCacheMode.PAGED_SCHEDULER
-            )
-            self._scheduler_paged_kv = scheduler_paged_kv
             if (
                 scheduler_paged_kv
                 and paged_kv_cache_role is not None
@@ -135,8 +136,8 @@ class Attention(nn.Module):
                 and not attn_backend_cls.supports_paged_kv
             ):
                 # FLASH_ATTN is an Omni selector, not a device-specific kernel.
-                # Resolve it only for this marked layer; unmarked dense attention
-                # keeps the platform default unchanged.
+                # Resolve it only for a marked paged layer; unmarked dense
+                # attention keeps the platform default unchanged.
                 from vllm_omni.diffusion.data import AttentionConfig, AttentionSpec
 
                 dense_backend_name = attn_backend_cls.get_name()
@@ -157,7 +158,8 @@ class Attention(nn.Module):
                 )
             parallel_config = getattr(config, "parallel_config", None)
             allgather_degree = getattr(parallel_config, "allgather_degree", 1)
-            # TODO: Move AllGather-KV compatibility into an AttentionBackend capability.
+            # TODO: Move AllGather-KV compatibility into an AttentionBackend capability
+            # so validation does not depend on backend names.
             if not skip_sequence_parallel and allgather_degree > 1 and attn_backend_cls.get_name() == "TRTLLM_ATTN":
                 raise ValueError(
                     "TRTLLM_ATTN does not support AllGather-KV sequence parallelism. "
@@ -193,11 +195,10 @@ class Attention(nn.Module):
                 qkv_layout=qkv_layout,
             )
         else:
+            if paged_kv_cache_role is not None:
+                raise ValueError("custom_attention does not support Scheduler-managed paged KV")
             if not skip_sequence_parallel:
                 raise ValueError("custom_attention must own its communication and requires skip_sequence_parallel=True")
-            if paged_kv_cache_role is not None:
-                raise ValueError("custom_attention cannot be combined with Scheduler-managed paged KV")
-            self._scheduler_paged_kv = False
             self.attn_backend = None
             self.attn_impl_cls = type(custom_attention)
             self.attention = custom_attention
@@ -517,11 +518,11 @@ class Attention(nn.Module):
         return self.attention.forward(query, key, value, attn_metadata)
 
     def _assert_piecewise_compatible(self, attn_metadata: AttentionMetadata | None) -> None:
-        if self.attn_backend is None:
-            return
         if attn_metadata is None or attn_metadata.full_attn_spans is None:
             return
         if attn_metadata.attn_mask is not None and attn_metadata.attn_mask.ndim == 4:
+            return
+        if self.attn_backend is None:
             return
         backend_name = self.attn_backend.get_name()
         if not self.attn_backend.supports_piecewise_spans:

@@ -11,7 +11,6 @@ class DiffusionModelMetadata:
     supports_multimodal_inputs: bool = False
     max_multimodal_image_inputs: int | None = None
     supports_mixed_reference_inputs: bool = False
-    resize_reference_images_to_output: bool = True
     attention_mask_free: bool = False
     final_output_type: str | None = None
 
@@ -31,10 +30,6 @@ _DIFFUSION_MODEL_METADATA: dict[str, DiffusionModelMetadata] = {
     "HunyuanImage3Pipeline": DiffusionModelMetadata(
         supports_multimodal_inputs=True,
         max_multimodal_image_inputs=HUNYUAN_IMAGE3_MAX_INPUT_IMAGES,
-    ),
-    "Magi2Pipeline": DiffusionModelMetadata(
-        supports_multimodal_inputs=True,
-        max_multimodal_image_inputs=1,
     ),
     # Shared by the Base (text-to-image) and Edit (TI2I) checkpoints, which use
     # the same ``BooguImagePipeline`` class. Text-to-image requests simply carry
@@ -58,6 +53,11 @@ _DIFFUSION_MODEL_METADATA: dict[str, DiffusionModelMetadata] = {
         supports_multimodal_inputs=True,
         max_multimodal_image_inputs=9,
         supports_mixed_reference_inputs=True,
+        final_output_type="video",
+    ),
+    "Magi2Pipeline": DiffusionModelMetadata(
+        supports_multimodal_inputs=True,
+        max_multimodal_image_inputs=1,
         final_output_type="video",
     ),
     "WanPipeline": DiffusionModelMetadata(
@@ -96,9 +96,6 @@ _DIFFUSION_MODEL_METADATA: dict[str, DiffusionModelMetadata] = {
     "SanaWmPipeline": DiffusionModelMetadata(
         supports_multimodal_inputs=True,
         max_multimodal_image_inputs=1,
-        # MAGI-2 preserves the source aspect ratio and applies its own
-        # checkpoint-aligned resize/pad transform during image conditioning.
-        resize_reference_images_to_output=False,
     ),
 }
 

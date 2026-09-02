@@ -58,6 +58,7 @@ class VideoParams(BaseModel):
     fps: float | None = Field(
         default=None,
         ge=1,
+        le=_INT64_MAX,
         allow_inf_nan=False,
         description="Frames per second for output video",
     )
@@ -154,6 +155,7 @@ class VideoGenerationRequest(BaseModel):
     fps: float | None = Field(
         default=None,
         ge=1,
+        le=_INT64_MAX,
         allow_inf_nan=False,
         description="Frames per second for output video",
     )

@@ -216,11 +216,6 @@ _DIFFUSION_MODELS = {
         "pipeline_hunyuan_image3",
         "HunyuanImage3Pipeline",
     ),
-    "Magi2Pipeline": (
-        "magi2",
-        "pipeline_magi2",
-        "Magi2Pipeline",
-    ),
     "Flux2KleinPipeline": (
         "flux2_klein",
         "pipeline_flux2_klein",
@@ -300,6 +295,11 @@ _DIFFUSION_MODELS = {
         "sana_video",
         "pipeline_sana_video_i2v",
         "SanaImageToVideoPipeline",
+    ),
+    "Magi2Pipeline": (
+        "magi2",
+        "pipeline_magi2",
+        "Magi2Pipeline",
     ),
     "OmniVoicePipeline": (
         "omnivoice",
