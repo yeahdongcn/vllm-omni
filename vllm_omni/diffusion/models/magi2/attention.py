@@ -161,21 +161,34 @@ def torch_varlen_attention_with_sink(
         raise ValueError("query and key cumulative-length arrays must contain the same batch count")
     output = torch.empty_like(q)
     scale = q.shape[-1] ** -0.5
+    # Materializing a full [heads, q_tokens, k_tokens] score tensor is
+    # prohibitive for MAGI-2 at 272p/540p on the MUSA Torch fallback. Process
+    # query rows in chunks instead; each row's softmax is independent, so this
+    # is numerically equivalent up to the reduction order. Tune for available
+    # workspace with MAGI2_TORCH_ATTN_Q_CHUNK (512 is a conservative default).
+    try:
+        q_chunk_size = max(1, int(os.environ.get("MAGI2_TORCH_ATTN_Q_CHUNK", "512")))
+    except ValueError:
+        q_chunk_size = 512
     for batch_idx in range(cu_seqlens_q.numel() - 1):
         q_start, q_end = (int(v) for v in cu_seqlens_q[batch_idx : batch_idx + 2].tolist())
         k_start, k_end = (int(v) for v in cu_seqlens_k[batch_idx : batch_idx + 2].tolist())
         q_part = q[q_start:q_end].float()
         k_part = _repeat_kv_heads(k[k_start:k_end], q.shape[1]).float()
         v_part = _repeat_kv_heads(v[k_start:k_end], q.shape[1]).float()
-        scores = torch.einsum("qhd,khd->hqk", q_part, k_part) * scale
-        if softcap > 0:
-            scores = softcap * torch.tanh(scores / softcap)
-        if sink is not None and sink.numel() > 0:
-            sink_scores = sink.float().transpose(0, 1).unsqueeze(1).expand(-1, q_part.shape[0], -1)
-            probabilities = torch.softmax(torch.cat((scores, sink_scores), dim=-1), dim=-1)[..., : k_part.shape[0]]
-        else:
-            probabilities = torch.softmax(scores, dim=-1)
-        output[q_start:q_end] = torch.einsum("hqk,khd->qhd", probabilities, v_part).to(output.dtype)
+        for q_offset in range(0, q_part.shape[0], q_chunk_size):
+            q_chunk = q_part[q_offset : q_offset + q_chunk_size]
+            scores = torch.einsum("qhd,khd->hqk", q_chunk, k_part) * scale
+            if softcap > 0:
+                scores = softcap * torch.tanh(scores / softcap)
+            if sink is not None and sink.numel() > 0:
+                sink_scores = sink.float().transpose(0, 1).unsqueeze(1).expand(-1, q_chunk.shape[0], -1)
+                probabilities = torch.softmax(torch.cat((scores, sink_scores), dim=-1), dim=-1)[..., : k_part.shape[0]]
+            else:
+                probabilities = torch.softmax(scores, dim=-1)
+            output[q_start + q_offset : q_start + q_offset + q_chunk.shape[0]] = torch.einsum(
+                "hqk,khd->qhd", probabilities, v_part
+            ).to(output.dtype)
     return output
 
 
