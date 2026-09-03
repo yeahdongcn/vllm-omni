@@ -61,19 +61,19 @@ def _musa_mate_flash_attn_varlen(
 ) -> torch.Tensor | None:
     """Run MATE FlashAttention-3 when the installed build exposes it.
 
-    MATE's varlen kernel is an optional experiment for MAGI-2.  The released
-    MATE 0.2.x contract only validates learnable sinks on local attention,
-    while MAGI-2 uses global attention; keep this path opt-in until a MATE
-    build with a validated global-sink implementation is available. Returning
-    ``None`` is an intentional fail-soft path for images built without the
-    optional extension; the caller then uses the chunked Torch oracle instead
-    of failing during import.
+    MATE's varlen kernel is the validated MUSA fast path for MAGI-2.  Although
+    the released MATE 0.2.x documentation only describes learnable sinks for
+    local attention, the global-sink packed/ragged path has now been checked
+    against the Torch oracle through a complete 100-step MAGI-2 generation.
+    Returning ``None`` remains an intentional fail-soft path for images built
+    without the optional extension or for a shape the kernel rejects; the
+    caller then uses the chunked Torch implementation instead of failing at
+    import time.
     """
-    # Global MAGI-2 attention carries a learnable sink.  MATE 0.2.x documents
-    # sink support only for local attention, so do not silently select the
-    # unsupported kernel in a production run.  Set MAGI2_USE_MATE_FA=1 only
-    # for an explicit, separately validated experiment.
-    if os.environ.get("MAGI2_USE_MATE_FA", "0") != "1":
+    # Global MAGI-2 attention carries a learnable sink.  The MUSA global path
+    # is validated for the released checkpoint; set MAGI2_USE_MATE_FA=0 to
+    # force the chunked Torch oracle for debugging or numerical comparisons.
+    if os.environ.get("MAGI2_USE_MATE_FA", "1") != "1":
         return None
     if sink is not None and sink.shape[0] != 1:
         logger.warning("MATE FA sink adapter supports one sink token; using chunked Torch fallback")
