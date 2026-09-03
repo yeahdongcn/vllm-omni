@@ -118,9 +118,12 @@ def torch_mh_moe_forward(
         raise ValueError("multi-head MoE input must be [tokens,heads,head_dim]")
     output = torch.zeros_like(x)
     experts_per_head = (expert_offsets.numel() - 1) // x.shape[1]
-    for flat_expert in range(expert_offsets.numel() - 1):
-        begin = int(expert_offsets[flat_expert].item())
-        end = int(expert_offsets[flat_expert + 1].item())
+    # Materialize the compact CSR offsets once per layer. Calling ``item``
+    # for every expert forces a device-to-host synchronization for each
+    # route; one bounded copy preserves the exact route order while avoiding
+    # thousands of scalar syncs across the DiT stack.
+    offsets = expert_offsets.detach().to(device="cpu").tolist()
+    for flat_expert, (begin, end) in enumerate(zip(offsets, offsets[1:])):
         if begin == end:
             continue
         head = flat_expert // experts_per_head
