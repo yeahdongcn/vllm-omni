@@ -13,6 +13,7 @@ whole-token :class:`FusedMoE` primitive.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from dataclasses import dataclass
@@ -30,6 +31,9 @@ from vllm_omni.platforms import current_omni_platform
 from .parallel import Magi2ParallelGroup, ep_dispatch, ep_undispatch, get_magi2_ep_group
 
 RoutingScore = Literal["softmax", "sigmoid"]
+
+logger = logging.getLogger(__name__)
+_MATE_MOE_WARNED = False
 
 
 def swiglu7_pair(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
@@ -136,6 +140,126 @@ def torch_mh_moe_forward(
         expert_output = expert_output * probs[begin:end, None].to(expert_output.dtype)
         output[:, head].index_add_(0, token_ids, expert_output)
     return output
+
+
+def _mate_bf16_grouped_linear(
+    input_a: torch.Tensor,
+    weight: torch.Tensor,
+    token_counts: torch.Tensor,
+    *,
+    major_b_mode: Literal["N"],
+    backend: str,
+) -> torch.Tensor:
+    """Run one MAGI expert projection through MATE's ragged BF16 GEMM.
+
+    MAGI stores gate/up/down weights as ``[expert, K, N]``.  The lower-level
+    MATE entry point is used instead of materializing transposed gate/up
+    copies: its ``major_b_mode="N"`` contract
+    accepts the checkpoint's K-major layout directly.
+    """
+
+    if major_b_mode != "N":
+        raise ValueError("MAGI grouped BF16 weights must use MATE major_b_mode='N'")
+    if (
+        not input_a.is_contiguous()
+        or not weight.is_contiguous()
+        or not token_counts.is_contiguous()
+    ):
+        raise ValueError("MATE grouped BF16 operands must be contiguous")
+    # MAGI checkpoint tensors are all stored as ``[K, N]`` per expert.  The
+    # MATE ``N`` major mode describes this physical layout and exposes the
+    # trailing dimension as the output width.
+    out_features = weight.shape[-1]
+    output = torch.empty(
+        (input_a.shape[0], out_features), device=input_a.device, dtype=input_a.dtype
+    )
+    from mate.gemm import ragged_m_moe_gemm_16bit
+
+    ragged_m_moe_gemm_16bit(
+        input_a,
+        weight,
+        token_counts,
+        output,
+        gemm_mode="per_expert",
+        major_a_mode="K",
+        major_b_mode=major_b_mode,
+        backend=backend,
+    )
+    return output
+
+
+def mate_bf16_mh_moe_forward(
+    x: torch.Tensor,
+    gather_ids: torch.Tensor,
+    probs: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    w_gate: torch.Tensor,
+    w_up: torch.Tensor,
+    w_down: torch.Tensor,
+    *,
+    backend: str = "mubin",
+) -> torch.Tensor:
+    """Evaluate the routed MAGI-2 MoE with MATE's grouped BF16 GEMMs.
+
+    ``global_sort_routes`` already lays routes out as contiguous expert
+    segments.  We only gather the corresponding head slices once, run the
+    three projections as ragged grouped GEMMs, and scatter the weighted result
+    once.  This is intentionally an opt-in experiment until the complete
+    distributed/capture matrix has been validated.
+    """
+
+    if x.ndim != 3:
+        raise ValueError("multi-head MoE input must be [tokens,heads,head_dim]")
+    if x.dtype != torch.bfloat16 or any(
+        weight.dtype != torch.bfloat16 for weight in (w_gate, w_up, w_down)
+    ):
+        raise ValueError("MATE BF16 grouped MoE requires BF16 activations and weights")
+    num_flat_experts = expert_offsets.numel() - 1
+    if num_flat_experts <= 0 or num_flat_experts % x.shape[1]:
+        raise ValueError("expert count must be a positive multiple of the head count")
+    if gather_ids.numel() == 0:
+        return torch.zeros_like(x)
+
+    experts_per_head = num_flat_experts // x.shape[1]
+    token_counts = torch.diff(expert_offsets).to(dtype=torch.int32).contiguous()
+    head_for_expert = torch.arange(
+        num_flat_experts, device=x.device, dtype=torch.long
+    ) // experts_per_head
+    head_ids = torch.repeat_interleave(head_for_expert, token_counts.to(torch.long))
+    token_ids = gather_ids.to(dtype=torch.long)
+    route_linear_ids = (token_ids * x.shape[1] + head_ids).contiguous()
+    routed_input = x.contiguous().view(-1, x.shape[-1]).index_select(0, route_linear_ids)
+
+    gate = _mate_bf16_grouped_linear(
+        routed_input,
+        w_gate,
+        token_counts,
+        major_b_mode="N",
+        backend=backend,
+    )
+    up = _mate_bf16_grouped_linear(
+        routed_input,
+        w_up,
+        token_counts,
+        major_b_mode="N",
+        backend=backend,
+    )
+    hidden = swiglu7_pair(gate, up)
+    expert_output = _mate_bf16_grouped_linear(
+        hidden,
+        w_down,
+        token_counts,
+        major_b_mode="N",
+        backend=backend,
+    )
+    expert_output = expert_output * probs[:, None].to(expert_output.dtype)
+    output = torch.zeros(
+        (x.shape[0] * x.shape[1], x.shape[-1]),
+        device=x.device,
+        dtype=x.dtype,
+    )
+    output.index_add_(0, route_linear_ids, expert_output)
+    return output.view_as(x)
 
 
 _SWIGLU7_ALPHA = tl.constexpr(1.702)
@@ -495,8 +619,44 @@ class Magi2MultiHeadMoE(nn.Module):
         return probs * self.config.route_scale, indices
 
     def _local_forward(self, x_heads: torch.Tensor) -> torch.Tensor:
+        global _MATE_MOE_WARNED
         probabilities, indices = self._route(x_heads)
         gather_ids, sorted_probs, offsets = global_sort_routes(probabilities, indices, self.num_experts)
+        if (
+            os.environ.get("MAGI2_USE_MATE_MOE", "0") == "1"
+            and x_heads.device.type == "musa"
+            and x_heads.dtype == torch.bfloat16
+        ):
+            backend = (os.environ.get("MAGI2_MATE_MOE_BACKEND") or "mubin").strip().lower()
+            if backend not in {"auto", "mubin"}:
+                raise ValueError(
+                    "MAGI2_MATE_MOE_BACKEND must be auto or mubin; "
+                    "mutlass does not accept per-expert count metadata"
+                )
+            if backend == "auto":
+                # ``auto`` currently resolves to Mubin for this API. Keep the
+                # effective choice explicit because the Mutlass branch treats
+                # the same tensor as an MGroupedContiguous row-ID layout.
+                backend = "mubin"
+            try:
+                return mate_bf16_mh_moe_forward(
+                    x_heads,
+                    gather_ids,
+                    sorted_probs,
+                    offsets,
+                    self.W_gate,
+                    self.W_up,
+                    self.W_down,
+                    backend=backend,
+                )
+            except Exception as exc:
+                if not _MATE_MOE_WARNED:
+                    logger.warning(
+                        "MATE BF16 grouped MAGI-2 MoE path failed; falling back "
+                        "to the Torch route: %s",
+                        exc,
+                    )
+                    _MATE_MOE_WARNED = True
         # The Triton kernel is currently qualified only on CUDA. Keep MUSA on
         # the numerically equivalent Torch path until a MUSA Triton launch is
         # explicitly enabled and benchmarked.
@@ -551,5 +711,6 @@ __all__ = [
     "compute_topk_probs_and_indices",
     "global_sort_routes",
     "torch_mh_moe_forward",
+    "mate_bf16_mh_moe_forward",
     "triton_mh_moe_forward",
 ]

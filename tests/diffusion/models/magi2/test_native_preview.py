@@ -16,6 +16,7 @@ from vllm_omni.diffusion.models.magi2.configuration_magi2 import (
     Magi2PreviewConfig,
 )
 from vllm_omni.diffusion.models.magi2.layers import MultiModalityRMSNorm
+from vllm_omni.diffusion.models.magi2 import mh_moe
 from vllm_omni.diffusion.models.magi2.mh_moe import Magi2MultiHeadMoE
 from vllm_omni.diffusion.models.magi2.modeling_magi2 import (
     Magi2PreviewTransformer,
@@ -168,6 +169,46 @@ def test_tiny_native_preview_runs_through_nested_cachedit_adapter() -> None:
         cache_dit.disable_cache(result.targets[0])
 
     assert not getattr(model.block, "_is_cached", False)
+
+
+def test_mate_bf16_moe_route_adapter_matches_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The grouped adapter preserves head/expert routing and accumulation.
+
+    Use a CPU reference stub for the MATE call so this test exercises the
+    packing/scatter logic in ordinary CI as well as the real S5000 probe.
+    """
+
+    tokens, heads, experts, d_head, d_expert = 3, 2, 3, 8, 16
+    x = torch.randn(tokens, heads, d_head, dtype=torch.bfloat16)
+    weights = [
+        torch.randn(heads * experts, d_head, d_expert, dtype=torch.bfloat16),
+        torch.randn(heads * experts, d_head, d_expert, dtype=torch.bfloat16),
+        torch.randn(heads * experts, d_expert, d_head, dtype=torch.bfloat16),
+    ]
+    # Flat experts 1 and 4 have no routes; token 0 is routed to two heads.
+    gather_ids = torch.tensor([0, 1, 0, 2], dtype=torch.int64)
+    probs = torch.tensor([0.2, 0.3, 0.4, 0.1], dtype=torch.float32)
+    expert_offsets = torch.tensor([0, 1, 1, 2, 3, 3, 4], dtype=torch.int64)
+
+    def fake_grouped(input_a, weight, token_counts, *, major_b_mode, backend):
+        assert major_b_mode == "N"
+        assert backend == "mubin"
+        chunks = []
+        cursor = 0
+        for expert, count in enumerate(token_counts.tolist()):
+            if count:
+                chunks.append(input_a[cursor : cursor + count] @ weight[expert])
+            cursor += count
+        return torch.cat(chunks, dim=0)
+
+    monkeypatch.setattr(mh_moe, "_mate_bf16_grouped_linear", fake_grouped)
+    expected = mh_moe.torch_mh_moe_forward(
+        x, gather_ids, probs, expert_offsets, weights[0], weights[1], weights[2]
+    )
+    actual = mh_moe.mate_bf16_mh_moe_forward(
+        x, gather_ids, probs, expert_offsets, weights[0], weights[1], weights[2]
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_tiny_native_preview_matches_pinned_reference_golden() -> None:
