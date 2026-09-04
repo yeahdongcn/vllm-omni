@@ -1411,6 +1411,13 @@ stages:
                 "video",
                 "minimax_h3_disaggregated",
             ),
+            (
+                "minimax_h3_disaggregated_musa.yaml",
+                "minimax_h3_disaggregated",
+                2,
+                "video",
+                "minimax_h3_disaggregated",
+            ),
         ],
     )
     def test_load_new_registry_backed_deploy_configs(
@@ -1490,6 +1497,21 @@ stages:
         turbo_sampling = turbo_stages[1].yaml_extras["default_sampling_params"]
         assert turbo_sampling["num_inference_steps"] == 5
         assert turbo_sampling["extra_args"] == {"flow_shift": 6.0, "audio_flow_shift": 3.0}
+
+    def test_minimax_h3_disaggregated_musa_uses_sharded_dit_and_vae(self):
+        pipeline = OMNI_PIPELINES["minimax_h3_disaggregated"]
+        deploy = load_deploy_config(Path(get_deploy_config_path("minimax_h3_disaggregated_musa.yaml")))
+        stages = merge_pipeline_deploy(pipeline, deploy)
+
+        assert stages[0].yaml_runtime["devices"] == "0,1"
+        assert stages[0].yaml_engine_args["tensor_parallel_size"] == 2
+        assert stages[1].yaml_runtime["devices"] == "2,3,4,5"
+        parallel = stages[1].yaml_engine_args["parallel_config"]
+        assert parallel == {
+            "tensor_parallel_size": 4,
+            "ulysses_degree": 1,
+            "vae_patch_parallel_size": 4,
+        }
 
     def test_minimax_h3_text_encoder_tp_alias_targets_stage_zero(self):
         pipeline = OMNI_PIPELINES["minimax_h3_disaggregated"]
