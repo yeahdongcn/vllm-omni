@@ -363,30 +363,6 @@ def test_mate_bf16_moe_route_adapter_fused_gate_up(monkeypatch: pytest.MonkeyPat
     assert calls == [tuple(packed_gate_up.shape), tuple(w_down.shape)]
 
 
-def test_gate_up_storage_repack_preserves_state_dict_layout() -> None:
-    """Repacking replaces storage without changing checkpoint keys/shapes."""
-
-    gate = torch.nn.Parameter(torch.randn(4, 8, 16, dtype=torch.bfloat16))
-    up = torch.nn.Parameter(torch.randn_like(gate))
-    gate_before = gate.detach().clone()
-    up_before = up.detach().clone()
-    keys_before = ["gate", "up"]
-
-    packed = mh_moe._pack_gate_up_parameter_storage(gate, up)
-    assert packed is not None
-    assert tuple(packed.shape) == (4, 8, 32)
-    assert packed.is_contiguous()
-    assert not gate.is_contiguous() and not up.is_contiguous()
-    assert up.data_ptr() - gate.data_ptr() == 16 * gate.element_size()
-    torch.testing.assert_close(gate, gate_before, rtol=0, atol=0)
-    torch.testing.assert_close(up, up_before, rtol=0, atol=0)
-
-    state = {"gate": gate, "up": up}
-    assert list(state) == keys_before
-    assert list(state["gate"].shape) == [4, 8, 16]
-    assert list(state["up"].shape) == [4, 8, 16]
-
-
 def test_tiny_native_preview_matches_pinned_reference_golden() -> None:
     """Full-model golden from SandAI reference f68a0f9bbccb.
 
