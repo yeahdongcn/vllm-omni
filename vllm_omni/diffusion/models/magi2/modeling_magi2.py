@@ -210,7 +210,12 @@ class Magi2MLP(nn.Module):
             parallel_mode="row",
         )
 
-    def forward(self, hidden_states: torch.Tensor, dispatcher: ModalityDispatcher) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        dispatcher: ModalityDispatcher,
+        _sequence_split_sizes: list[int] | torch.Tensor | None = None,
+    ) -> torch.Tensor:
         hidden_states = self.pre_norm(hidden_states, dispatcher)
         hidden_states = self.up_gate_proj(hidden_states, dispatcher)
         hidden_states = swiglu7(hidden_states)
@@ -303,10 +308,15 @@ class Magi2MultiHeadMoELayer(nn.Module):
             modality.contiguous(), dispatcher
         )
 
-    def forward(self, hidden_states: torch.Tensor, dispatcher: ModalityDispatcher) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        dispatcher: ModalityDispatcher,
+        sequence_split_sizes: list[int] | torch.Tensor | None = None,
+    ) -> torch.Tensor:
         normalized = self.pre_norm(hidden_states, dispatcher)
         routed = self.split_linear(normalized)
-        routed = self.moe_mlp(routed)
+        routed = self.moe_mlp(routed, sequence_split_sizes=sequence_split_sizes)
         routed = self.merge_linear(routed)
         return routed + self._shared_experts(normalized, dispatcher)
 
@@ -547,7 +557,7 @@ class Magi2TransformerLayer(nn.Module):
         streams = self._connect(streams, attention_output, "attn", attention_logits)
         mlp_logits = self._branch_logits(streams, "mlp", modality_dispatcher)
         mlp_input = self._branch_input(streams, "mlp", mlp_logits)
-        mlp_output = self.mlp(mlp_input, modality_dispatcher)
+        mlp_output = self.mlp(mlp_input, modality_dispatcher, cp_split_sizes)
         streams = self._connect(streams, mlp_output, "mlp", mlp_logits)
         return streams.reshape(streams.shape[0], -1)
 

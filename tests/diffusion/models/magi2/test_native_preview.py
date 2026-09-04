@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import cache_dit
 import pytest
 import torch
@@ -270,6 +272,42 @@ def test_global_sort_routes_with_head_ids_and_counts_reuses_csr_histogram() -> N
         minlength=heads * experts,
     ).to(torch.int32)
     torch.testing.assert_close(actual[4], expected_counts, rtol=0, atol=0)
+
+
+def test_moe_forward_uses_request_split_sizes_without_all_gather(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transformer-provided split vector avoids per-layer scalar syncs."""
+
+    moe = object.__new__(mh_moe.Magi2MultiHeadMoE)
+    moe.ep_group = SimpleNamespace(world_size=2, rank=0, replicated_sequence=False)
+    moe.ep_pad_heads = 0
+    moe.num_heads = 2
+    moe.d_head = 2
+    moe.has_real_moe_heads = True
+    calls: dict[str, object] = {}
+
+    def fake_dispatch(tensor, group, split_sizes):
+        calls["dispatch"] = split_sizes
+        return tensor
+
+    def fake_undispatch(tensor, group, split_sizes):
+        calls["undispatch"] = split_sizes
+        return tensor
+
+    monkeypatch.setattr(mh_moe, "ep_dispatch", fake_dispatch)
+    monkeypatch.setattr(mh_moe, "ep_undispatch", fake_undispatch)
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_gather",
+        lambda *args, **kwargs: pytest.fail("request split sizes should bypass all_gather"),
+    )
+    monkeypatch.setattr(moe, "_local_forward", lambda tensor: tensor, raising=False)
+
+    x = torch.randn(2, 4)
+    actual = moe.forward(x, sequence_split_sizes=[2, 2])
+    torch.testing.assert_close(actual, x)
+    assert calls == {"dispatch": [2, 2], "undispatch": [2, 2]}
 
 
 def test_global_sort_routes_builds_exact_csr_counts() -> None:

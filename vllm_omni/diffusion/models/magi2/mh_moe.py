@@ -788,7 +788,12 @@ class Magi2MultiHeadMoE(nn.Module):
             )
         return torch_mh_moe_forward(x_heads, gather_ids, sorted_probs, offsets, self.W_gate, self.W_up, self.W_down)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        sequence_split_sizes: list[int] | torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if self.ep_group.world_size > 1 and self.ep_group.replicated_sequence:
             # TP column-parallel ``split_linear`` already emits exactly this
             # rank's contiguous MoE-head slice.  Compute it once and leave it
@@ -805,16 +810,31 @@ class Magi2MultiHeadMoE(nn.Module):
         if self.ep_pad_heads:
             padding = x_heads.new_zeros((x_heads.shape[0], self.ep_pad_heads, self.d_head))
             x_heads = torch.cat((x_heads, padding), dim=1)
-        sequence_split_sizes: list[int] | None = None
+        resolved_split_sizes: list[int] | None = None
         if self.ep_group.world_size > 1:
-            local_size = torch.tensor([x_heads.shape[0]], dtype=torch.int64, device=x_heads.device)
-            gathered_sizes = [torch.empty_like(local_size) for _ in range(self.ep_group.world_size)]
-            torch.distributed.all_gather(gathered_sizes, local_size, group=self.ep_group.group)
-            sequence_split_sizes = [int(size.item()) for size in gathered_sizes]
-            x_heads = ep_dispatch(x_heads, self.ep_group, sequence_split_sizes)
+            if sequence_split_sizes is None:
+                local_size = torch.tensor([x_heads.shape[0]], dtype=torch.int64, device=x_heads.device)
+                gathered_sizes = [torch.empty_like(local_size) for _ in range(self.ep_group.world_size)]
+                torch.distributed.all_gather(gathered_sizes, local_size, group=self.ep_group.group)
+                resolved_split_sizes = [int(size.item()) for size in gathered_sizes]
+            elif isinstance(sequence_split_sizes, torch.Tensor):
+                if sequence_split_sizes.device.type != "cpu":
+                    raise ValueError("sequence_split_sizes tensor must be CPU-resident")
+                resolved_split_sizes = [int(size) for size in sequence_split_sizes.tolist()]
+            else:
+                resolved_split_sizes = [int(size) for size in sequence_split_sizes]
+            if (
+                len(resolved_split_sizes) != self.ep_group.world_size
+                or any(size < 0 for size in resolved_split_sizes)
+                or resolved_split_sizes[self.ep_group.rank] != x_heads.shape[0]
+            ):
+                raise ValueError(
+                    "sequence_split_sizes must match the MoE group's local sequence shard"
+                )
+            x_heads = ep_dispatch(x_heads, self.ep_group, resolved_split_sizes)
         output = self._local_forward(x_heads) if self.has_real_moe_heads else torch.zeros_like(x_heads)
         if self.ep_group.world_size > 1:
-            output = ep_undispatch(output, self.ep_group, sequence_split_sizes)
+            output = ep_undispatch(output, self.ep_group, resolved_split_sizes)
         if self.ep_pad_heads:
             output = output[:, : self.num_heads]
         return output.reshape(-1, self.num_heads * self.d_head)
