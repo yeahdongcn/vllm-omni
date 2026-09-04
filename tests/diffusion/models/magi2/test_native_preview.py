@@ -243,6 +243,32 @@ def test_global_sort_routes_with_head_ids_preserves_stable_order() -> None:
     torch.testing.assert_close(actual[3], expected_head_ids, rtol=0, atol=0)
 
 
+def test_global_sort_routes_builds_exact_csr_counts() -> None:
+    """The MUSA scatter-count implementation must preserve every offset."""
+
+    heads, tokens, top_k, experts = 2, 5, 3, 4
+    topk_probs = torch.arange(heads * tokens * top_k, dtype=torch.float32).view(
+        heads, tokens, top_k
+    )
+    topk_indices = torch.tensor(
+        [
+            [[0, 3, 1], [2, 0, 3], [1, 1, 0], [3, 2, 2], [0, 3, 1]],
+            [[2, 2, 3], [1, 0, 0], [3, 1, 2], [0, 2, 3], [1, 3, 0]],
+        ],
+        dtype=torch.long,
+    )
+    _gather_ids, _sorted_probs, offsets = mh_moe.global_sort_routes(
+        topk_probs, topk_indices, experts
+    )
+    head_offsets = torch.arange(heads, dtype=torch.long).view(heads, 1, 1) * experts
+    flattened_experts = (topk_indices + head_offsets).reshape(-1)
+    expected_counts = torch.bincount(flattened_experts, minlength=heads * experts)
+    expected_offsets = torch.cat(
+        (torch.zeros(1, dtype=torch.long), expected_counts.cumsum(0))
+    )
+    torch.testing.assert_close(offsets, expected_offsets, rtol=0, atol=0)
+
+
 def test_mate_bf16_moe_route_adapter_accepts_sorted_head_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

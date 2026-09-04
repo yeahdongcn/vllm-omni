@@ -101,7 +101,17 @@ def _global_sort_routes_impl(
     order = flattened_experts.argsort(stable=True)
     gather_ids = flat_tokens[order].to(torch.int32)
     sorted_probs = flat_probs[order].float()
-    counts = torch.bincount(flattened_experts, minlength=heads * num_experts)
+    # ``torch.bincount`` on MUSA performs an internal min/max and scalar
+    # synchronization before building its histogram.  Route IDs are already
+    # bounded non-negative integers, so an int32 scatter accumulation is both
+    # exact and substantially cheaper while preserving the same CSR counts.
+    counts = torch.zeros(heads * num_experts, device=device, dtype=torch.int32)
+    if flattened_experts.numel():
+        counts.scatter_add_(
+            0,
+            flattened_experts,
+            torch.ones_like(flattened_experts, dtype=torch.int32),
+        )
     offsets = torch.zeros(heads * num_experts + 1, device=device, dtype=torch.long)
     offsets[1:] = counts.cumsum(0)
     return gather_ids, sorted_probs, offsets, order
