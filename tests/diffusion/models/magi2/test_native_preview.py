@@ -211,6 +211,88 @@ def test_mate_bf16_moe_route_adapter_matches_torch(monkeypatch: pytest.MonkeyPat
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+def test_global_sort_routes_with_head_ids_preserves_stable_order() -> None:
+    """The optional head metadata must be derived from the same stable sort."""
+
+    heads, tokens, top_k, experts = 2, 3, 2, 4
+    topk_probs = torch.tensor(
+        [
+            [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]],
+            [[0.7, 0.8], [0.9, 1.0], [1.1, 1.2]],
+        ],
+        dtype=torch.float32,
+    )
+    topk_indices = torch.tensor(
+        [
+            [[2, 0], [1, 3], [0, 2]],
+            [[1, 0], [3, 2], [2, 1]],
+        ],
+        dtype=torch.int64,
+    )
+
+    expected = mh_moe.global_sort_routes(topk_probs, topk_indices, experts)
+    actual = mh_moe.global_sort_routes_with_head_ids(topk_probs, topk_indices, experts)
+
+    for expected_value, actual_value in zip(expected, actual[:3]):
+        torch.testing.assert_close(actual_value, expected_value, rtol=0, atol=0)
+
+    head_offset = torch.arange(heads).view(heads, 1, 1) * experts
+    flattened_experts = (topk_indices + head_offset).reshape(-1)
+    order = flattened_experts.argsort(stable=True)
+    expected_head_ids = order // (tokens * top_k)
+    torch.testing.assert_close(actual[3], expected_head_ids, rtol=0, atol=0)
+
+
+def test_mate_bf16_moe_route_adapter_accepts_sorted_head_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Supplying sorted head IDs avoids the per-route repeat_interleave path."""
+
+    tokens, heads, experts, d_head, d_expert = 3, 2, 3, 8, 16
+    x = torch.randn(tokens, heads, d_head, dtype=torch.bfloat16)
+    weights = [
+        torch.randn(heads * experts, d_head, d_expert, dtype=torch.bfloat16),
+        torch.randn(heads * experts, d_head, d_expert, dtype=torch.bfloat16),
+        torch.randn(heads * experts, d_expert, d_head, dtype=torch.bfloat16),
+    ]
+    gather_ids = torch.tensor([0, 1, 0, 2], dtype=torch.int64)
+    probs = torch.tensor([0.2, 0.3, 0.4, 0.1], dtype=torch.float32)
+    expert_offsets = torch.tensor([0, 1, 1, 2, 3, 3, 4], dtype=torch.int64)
+    sorted_head_ids = torch.tensor([0, 0, 1, 1], dtype=torch.int64)
+
+    def fake_grouped(input_a, weight, token_counts, *, major_b_mode, backend):
+        assert major_b_mode == "N"
+        assert backend == "mubin"
+        chunks = []
+        cursor = 0
+        for expert, count in enumerate(token_counts.tolist()):
+            if count:
+                chunks.append(input_a[cursor : cursor + count] @ weight[expert])
+            cursor += count
+        return torch.cat(chunks, dim=0)
+
+    monkeypatch.setattr(mh_moe, "_mate_bf16_grouped_linear", fake_grouped)
+    expected = mh_moe.torch_mh_moe_forward(
+        x, gather_ids, probs, expert_offsets, weights[0], weights[1], weights[2]
+    )
+
+    def fail_repeat_interleave(*args, **kwargs):
+        raise AssertionError("sorted head metadata should bypass repeat_interleave")
+
+    monkeypatch.setattr(torch, "repeat_interleave", fail_repeat_interleave)
+    actual = mh_moe.mate_bf16_mh_moe_forward(
+        x,
+        gather_ids,
+        probs,
+        expert_offsets,
+        weights[0],
+        weights[1],
+        weights[2],
+        sorted_head_ids=sorted_head_ids,
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_tiny_native_preview_matches_pinned_reference_golden() -> None:
     """Full-model golden from SandAI reference f68a0f9bbccb.
 

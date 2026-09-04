@@ -83,12 +83,12 @@ def compute_topk_probs_and_indices(
     return topk_probs, topk_indices
 
 
-def global_sort_routes(
+def _global_sort_routes_impl(
     topk_probs: torch.Tensor,
     topk_indices: torch.Tensor,
     num_experts: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Convert per-head routes into a stable flattened-expert CSR layout."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build the stable flattened-expert route layout and retain sort order."""
 
     if topk_probs.shape != topk_indices.shape or topk_indices.ndim != 3:
         raise ValueError("top-k probabilities and indices must have the same [H,S,K] shape")
@@ -104,7 +104,50 @@ def global_sort_routes(
     counts = torch.bincount(flattened_experts, minlength=heads * num_experts)
     offsets = torch.zeros(heads * num_experts + 1, device=device, dtype=torch.long)
     offsets[1:] = counts.cumsum(0)
+    return gather_ids, sorted_probs, offsets, order
+
+
+def global_sort_routes(
+    topk_probs: torch.Tensor,
+    topk_indices: torch.Tensor,
+    num_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Convert per-head routes into a stable flattened-expert CSR layout.
+
+    Keep this three-tensor return contract for existing callers.  The MATE
+    path can use :func:`global_sort_routes_with_head_ids` when it also needs
+    the source head for every sorted route.
+    """
+
+    gather_ids, sorted_probs, offsets, _ = _global_sort_routes_impl(
+        topk_probs, topk_indices, num_experts
+    )
     return gather_ids, sorted_probs, offsets
+
+
+def global_sort_routes_with_head_ids(
+    topk_probs: torch.Tensor,
+    topk_indices: torch.Tensor,
+    num_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return sorted routes plus source-head IDs without expanding counts.
+
+    ``flattened_experts`` is laid out as ``[head, sequence, top_k]`` before
+    sorting.  Therefore the source head of a sorted route is recoverable from
+    its stable-sort position with one integer division.  The optional metadata
+    lets the MATE adapter avoid constructing an ``E``-element head table and
+    ``repeat_interleave``-ing it to route length on every layer.
+    """
+
+    gather_ids, sorted_probs, offsets, order = _global_sort_routes_impl(
+        topk_probs, topk_indices, num_experts
+    )
+    _, sequence, top_k = topk_indices.shape
+    if order.numel() == 0:
+        sorted_head_ids = order
+    else:
+        sorted_head_ids = torch.div(order, sequence * top_k, rounding_mode="floor")
+    return gather_ids, sorted_probs, offsets, sorted_head_ids
 
 
 def torch_mh_moe_forward(
@@ -198,14 +241,18 @@ def mate_bf16_mh_moe_forward(
     w_down: torch.Tensor,
     *,
     backend: str = "mubin",
+    sorted_head_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Evaluate the routed MAGI-2 MoE with MATE's grouped BF16 GEMMs.
 
     ``global_sort_routes`` already lays routes out as contiguous expert
     segments.  We only gather the corresponding head slices once, run the
     three projections as ragged grouped GEMMs, and scatter the weighted result
-    once.  This is intentionally an opt-in experiment until the complete
-    distributed/capture matrix has been validated.
+    once.  ``sorted_head_ids`` is an optional companion produced by
+    :func:`global_sort_routes_with_head_ids`; supplying it avoids rebuilding
+    the same head mapping with ``repeat_interleave``.  This is intentionally
+    an opt-in experiment until the complete distributed/capture matrix has
+    been validated.
     """
 
     if x.ndim != 3:
@@ -220,13 +267,20 @@ def mate_bf16_mh_moe_forward(
     if gather_ids.numel() == 0:
         return torch.zeros_like(x)
 
-    experts_per_head = num_flat_experts // x.shape[1]
     token_counts = torch.diff(expert_offsets).to(dtype=torch.int32).contiguous()
-    head_for_expert = torch.arange(
-        num_flat_experts, device=x.device, dtype=torch.long
-    ) // experts_per_head
-    head_ids = torch.repeat_interleave(head_for_expert, token_counts.to(torch.long))
     token_ids = gather_ids.to(dtype=torch.long)
+    if sorted_head_ids is None:
+        experts_per_head = num_flat_experts // x.shape[1]
+        head_for_expert = torch.arange(
+            num_flat_experts, device=x.device, dtype=torch.long
+        ) // experts_per_head
+        head_ids = torch.repeat_interleave(head_for_expert, token_counts.to(torch.long))
+    else:
+        if sorted_head_ids.ndim != 1 or sorted_head_ids.numel() != token_ids.numel():
+            raise ValueError("sorted_head_ids must be one entry per sorted route")
+        if sorted_head_ids.device != x.device:
+            raise ValueError("sorted_head_ids must be on the MoE input device")
+        head_ids = sorted_head_ids.to(dtype=torch.long)
     route_linear_ids = (token_ids * x.shape[1] + head_ids).contiguous()
     routed_input = x.contiguous().view(-1, x.shape[-1]).index_select(0, route_linear_ids)
 
@@ -621,12 +675,24 @@ class Magi2MultiHeadMoE(nn.Module):
     def _local_forward(self, x_heads: torch.Tensor) -> torch.Tensor:
         global _MATE_MOE_WARNED
         probabilities, indices = self._route(x_heads)
-        gather_ids, sorted_probs, offsets = global_sort_routes(probabilities, indices, self.num_experts)
-        if (
+        use_mate = (
             os.environ.get("MAGI2_USE_MATE_MOE", "0") == "1"
             and x_heads.device.type == "musa"
             and x_heads.dtype == torch.bfloat16
-        ):
+        )
+        sorted_head_ids: torch.Tensor | None = None
+        if use_mate:
+            (
+                gather_ids,
+                sorted_probs,
+                offsets,
+                sorted_head_ids,
+            ) = global_sort_routes_with_head_ids(probabilities, indices, self.num_experts)
+        else:
+            gather_ids, sorted_probs, offsets = global_sort_routes(
+                probabilities, indices, self.num_experts
+            )
+        if use_mate:
             backend = (os.environ.get("MAGI2_MATE_MOE_BACKEND") or "mubin").strip().lower()
             if backend not in {"auto", "mubin"}:
                 raise ValueError(
@@ -648,6 +714,7 @@ class Magi2MultiHeadMoE(nn.Module):
                     self.W_up,
                     self.W_down,
                     backend=backend,
+                    sorted_head_ids=sorted_head_ids,
                 )
             except Exception as exc:
                 if not _MATE_MOE_WARNED:
@@ -710,6 +777,7 @@ __all__ = [
     "Magi2MultiHeadMoEConfig",
     "compute_topk_probs_and_indices",
     "global_sort_routes",
+    "global_sort_routes_with_head_ids",
     "torch_mh_moe_forward",
     "mate_bf16_mh_moe_forward",
     "triton_mh_moe_forward",
