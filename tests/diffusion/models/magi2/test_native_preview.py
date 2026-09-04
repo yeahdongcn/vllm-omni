@@ -243,6 +243,35 @@ def test_global_sort_routes_with_head_ids_preserves_stable_order() -> None:
     torch.testing.assert_close(actual[3], expected_head_ids, rtol=0, atol=0)
 
 
+def test_global_sort_routes_with_head_ids_and_counts_reuses_csr_histogram() -> None:
+    """The MATE metadata helper exposes the exact int32 CSR histogram."""
+
+    heads, tokens, top_k, experts = 2, 3, 2, 4
+    topk_probs = torch.arange(heads * tokens * top_k, dtype=torch.float32).view(
+        heads, tokens, top_k
+    )
+    topk_indices = torch.tensor(
+        [
+            [[2, 0], [1, 3], [0, 2]],
+            [[1, 0], [3, 2], [2, 1]],
+        ],
+        dtype=torch.long,
+    )
+    expected = mh_moe.global_sort_routes_with_head_ids(
+        topk_probs, topk_indices, experts
+    )
+    actual = mh_moe.global_sort_routes_with_head_ids_and_counts(
+        topk_probs, topk_indices, experts
+    )
+    for expected_value, actual_value in zip(expected, actual[:4]):
+        torch.testing.assert_close(actual_value, expected_value, rtol=0, atol=0)
+    expected_counts = torch.bincount(
+        (topk_indices + torch.arange(heads).view(heads, 1, 1) * experts).reshape(-1),
+        minlength=heads * experts,
+    ).to(torch.int32)
+    torch.testing.assert_close(actual[4], expected_counts, rtol=0, atol=0)
+
+
 def test_global_sort_routes_builds_exact_csr_counts() -> None:
     """The MUSA scatter-count implementation must preserve every offset."""
 
@@ -306,6 +335,11 @@ def test_mate_bf16_moe_route_adapter_accepts_sorted_head_ids(
         raise AssertionError("sorted head metadata should bypass repeat_interleave")
 
     monkeypatch.setattr(torch, "repeat_interleave", fail_repeat_interleave)
+
+    def fail_diff(*args, **kwargs):
+        raise AssertionError("supplied counts should bypass diff")
+
+    monkeypatch.setattr(torch, "diff", fail_diff)
     actual = mh_moe.mate_bf16_mh_moe_forward(
         x,
         gather_ids,
@@ -315,6 +349,7 @@ def test_mate_bf16_moe_route_adapter_accepts_sorted_head_ids(
         weights[1],
         weights[2],
         sorted_head_ids=sorted_head_ids,
+        token_counts=torch.tensor([1, 0, 1, 1, 0, 1], dtype=torch.int32),
     )
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 

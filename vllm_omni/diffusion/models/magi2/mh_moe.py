@@ -87,7 +87,7 @@ def _global_sort_routes_impl(
     topk_probs: torch.Tensor,
     topk_indices: torch.Tensor,
     num_experts: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build the stable flattened-expert route layout and retain sort order."""
 
     if topk_probs.shape != topk_indices.shape or topk_indices.ndim != 3:
@@ -114,7 +114,7 @@ def _global_sort_routes_impl(
         )
     offsets = torch.zeros(heads * num_experts + 1, device=device, dtype=torch.long)
     offsets[1:] = counts.cumsum(0)
-    return gather_ids, sorted_probs, offsets, order
+    return gather_ids, sorted_probs, offsets, order, counts
 
 
 def global_sort_routes(
@@ -129,7 +129,7 @@ def global_sort_routes(
     the source head for every sorted route.
     """
 
-    gather_ids, sorted_probs, offsets, _ = _global_sort_routes_impl(
+    gather_ids, sorted_probs, offsets, _, _ = _global_sort_routes_impl(
         topk_probs, topk_indices, num_experts
     )
     return gather_ids, sorted_probs, offsets
@@ -149,7 +149,7 @@ def global_sort_routes_with_head_ids(
     ``repeat_interleave``-ing it to route length on every layer.
     """
 
-    gather_ids, sorted_probs, offsets, order = _global_sort_routes_impl(
+    gather_ids, sorted_probs, offsets, order, _ = _global_sort_routes_impl(
         topk_probs, topk_indices, num_experts
     )
     _, sequence, top_k = topk_indices.shape
@@ -158,6 +158,30 @@ def global_sort_routes_with_head_ids(
     else:
         sorted_head_ids = torch.div(order, sequence * top_k, rounding_mode="floor")
     return gather_ids, sorted_probs, offsets, sorted_head_ids
+
+
+def global_sort_routes_with_head_ids_and_counts(
+    topk_probs: torch.Tensor,
+    topk_indices: torch.Tensor,
+    num_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return sorted routes, source heads, and the exact route counts.
+
+    The count vector is the same int32 histogram used to build ``offsets``.
+    MATE's per-expert grouped GEMM consumes it directly, so exposing it here
+    avoids a second ``diff(offsets)`` plus dtype/layout conversion in the
+    adapter while keeping the legacy three-/four-tensor APIs unchanged.
+    """
+
+    gather_ids, sorted_probs, offsets, order, counts = _global_sort_routes_impl(
+        topk_probs, topk_indices, num_experts
+    )
+    _, sequence, top_k = topk_indices.shape
+    if order.numel() == 0:
+        sorted_head_ids = order
+    else:
+        sorted_head_ids = torch.div(order, sequence * top_k, rounding_mode="floor")
+    return gather_ids, sorted_probs, offsets, sorted_head_ids, counts
 
 
 def torch_mh_moe_forward(
@@ -252,15 +276,16 @@ def mate_bf16_mh_moe_forward(
     *,
     backend: str = "mubin",
     sorted_head_ids: torch.Tensor | None = None,
+    token_counts: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Evaluate the routed MAGI-2 MoE with MATE's grouped BF16 GEMMs.
 
     ``global_sort_routes`` already lays routes out as contiguous expert
     segments.  We only gather the corresponding head slices once, run the
     three projections as ragged grouped GEMMs, and scatter the weighted result
-    once.  ``sorted_head_ids`` is an optional companion produced by
-    :func:`global_sort_routes_with_head_ids`; supplying it avoids rebuilding
-    the same head mapping with ``repeat_interleave``.  This is intentionally
+    once.  ``sorted_head_ids`` and ``token_counts`` are optional companions
+    produced by :func:`global_sort_routes_with_head_ids_and_counts`; supplying
+    them avoids rebuilding route metadata in the adapter. This is intentionally
     an opt-in experiment until the complete distributed/capture matrix has
     been validated.
     """
@@ -277,7 +302,15 @@ def mate_bf16_mh_moe_forward(
     if gather_ids.numel() == 0:
         return torch.zeros_like(x)
 
-    token_counts = torch.diff(expert_offsets).to(dtype=torch.int32).contiguous()
+    if token_counts is None:
+        token_counts = torch.diff(expert_offsets).to(dtype=torch.int32).contiguous()
+    else:
+        if token_counts.ndim != 1 or token_counts.numel() != num_flat_experts:
+            raise ValueError("token_counts must have one entry per flattened expert")
+        if token_counts.device != x.device:
+            raise ValueError("token_counts must be on the MoE input device")
+        if token_counts.dtype != torch.int32 or not token_counts.is_contiguous():
+            token_counts = token_counts.to(dtype=torch.int32).contiguous()
     token_ids = gather_ids.to(dtype=torch.long)
     if sorted_head_ids is None:
         experts_per_head = num_flat_experts // x.shape[1]
@@ -691,13 +724,17 @@ class Magi2MultiHeadMoE(nn.Module):
             and x_heads.dtype == torch.bfloat16
         )
         sorted_head_ids: torch.Tensor | None = None
+        route_counts: torch.Tensor | None = None
         if use_mate:
             (
                 gather_ids,
                 sorted_probs,
                 offsets,
                 sorted_head_ids,
-            ) = global_sort_routes_with_head_ids(probabilities, indices, self.num_experts)
+                route_counts,
+            ) = global_sort_routes_with_head_ids_and_counts(
+                probabilities, indices, self.num_experts
+            )
         else:
             gather_ids, sorted_probs, offsets = global_sort_routes(
                 probabilities, indices, self.num_experts
@@ -725,6 +762,7 @@ class Magi2MultiHeadMoE(nn.Module):
                     self.W_down,
                     backend=backend,
                     sorted_head_ids=sorted_head_ids,
+                    token_counts=route_counts,
                 )
             except Exception as exc:
                 if not _MATE_MOE_WARNED:
@@ -788,6 +826,7 @@ __all__ = [
     "compute_topk_probs_and_indices",
     "global_sort_routes",
     "global_sort_routes_with_head_ids",
+    "global_sort_routes_with_head_ids_and_counts",
     "torch_mh_moe_forward",
     "mate_bf16_mh_moe_forward",
     "triton_mh_moe_forward",
