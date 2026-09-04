@@ -12,6 +12,8 @@ MagiCompiler and external Triton runtime dependencies.
 from __future__ import annotations
 
 import math
+import os
+import logging
 from collections.abc import Callable
 
 import torch
@@ -20,6 +22,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .parallel import Magi2ParallelGroup, get_magi2_tp_group
+
+logger = logging.getLogger(__name__)
 
 
 def swiglu7(
@@ -329,7 +333,27 @@ class ElementWiseFourierEmbed(nn.Module):
 MHCTensorTuple = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
+_MHC_FUSED_DISABLED = False
+
+
 def sinkhorn_knopp(matrix_logits: torch.Tensor, iterations: int, epsilon: float) -> torch.Tensor:
+    global _MHC_FUSED_DISABLED
+    fused_setting = os.environ.get("MAGI2_USE_MHC_FUSED")
+    use_fused = (
+        not _MHC_FUSED_DISABLED
+        and fused_setting != "0"
+        and matrix_logits.device.type in ("musa", "privateuseone")
+        and matrix_logits.ndim == 3
+        and matrix_logits.shape[-2:] == (4, 4)
+    )
+    if use_fused:
+        try:
+            from .mhc_kernel import mhc_sinkhorn
+
+            return mhc_sinkhorn(matrix_logits, num_iters=iterations, eps=epsilon)
+        except Exception as exc:
+            logger.warning("MAGI-2 fused mHC Sinkhorn failed; using reference path: %s", exc)
+            _MHC_FUSED_DISABLED = True
     matrix = torch.exp(matrix_logits - matrix_logits.amax(dim=(-2, -1), keepdim=True))
     for _ in range(iterations):
         matrix = matrix / (matrix.sum(dim=-2, keepdim=True) + epsilon)
@@ -415,6 +439,30 @@ class MHCHandler:
         self._check_multi(residual_streams)
         if branch_output.ndim != 2 or branch_output.shape[-1] != self.hidden_size:
             raise ValueError("invalid mHC branch-output shape")
+        fused_setting = os.environ.get("MAGI2_USE_MHC_FUSED")
+        if (
+            fused_setting != "0"
+            and residual_streams.device.type in ("musa", "privateuseone")
+            and self.num_streams == 4
+        ):
+            try:
+                from .mhc_kernel import mhc_mix_output
+
+                if not (
+                    residual_streams.is_contiguous()
+                    and branch_output.is_contiguous()
+                    and post_coefficients.is_contiguous()
+                    and residual_matrix.is_contiguous()
+                ):
+                    raise ValueError("mHC fused inputs must be contiguous")
+                return mhc_mix_output(
+                    residual_streams,
+                    branch_output,
+                    post_coefficients,
+                    residual_matrix,
+                )
+            except Exception as exc:
+                logger.warning("MAGI-2 fused mHC mix failed; using reference path: %s", exc)
         branch = torch.einsum("tn,tc->tnc", post_coefficients, branch_output)
         mixed = torch.einsum("tij,tjc->tic", residual_matrix, residual_streams)
         return mixed + branch
