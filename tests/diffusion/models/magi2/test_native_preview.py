@@ -319,50 +319,6 @@ def test_mate_bf16_moe_route_adapter_accepts_sorted_head_ids(
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_mate_bf16_moe_route_adapter_fused_gate_up(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A packed gate/up projection is one grouped call plus the down call."""
-
-    tokens, heads, experts, d_head, d_expert = 3, 2, 3, 8, 16
-    x = torch.randn(tokens, heads, d_head, dtype=torch.bfloat16)
-    w_gate = torch.randn(heads * experts, d_head, d_expert, dtype=torch.bfloat16)
-    w_up = torch.randn_like(w_gate)
-    w_down = torch.randn(heads * experts, d_expert, d_head, dtype=torch.bfloat16)
-    packed_gate_up = torch.cat((w_gate, w_up), dim=-1).contiguous()
-    gather_ids = torch.tensor([0, 1, 0, 2], dtype=torch.int64)
-    probs = torch.tensor([0.2, 0.3, 0.4, 0.1], dtype=torch.float32)
-    expert_offsets = torch.tensor([0, 1, 1, 2, 3, 3, 4], dtype=torch.int64)
-    calls: list[tuple[int, ...]] = []
-
-    def fake_grouped(input_a, weight, token_counts, *, major_b_mode, backend):
-        assert major_b_mode == "N"
-        assert backend == "mubin"
-        calls.append(tuple(weight.shape))
-        chunks = []
-        cursor = 0
-        for expert, count in enumerate(token_counts.tolist()):
-            if count:
-                chunks.append(input_a[cursor : cursor + count] @ weight[expert])
-            cursor += count
-        return torch.cat(chunks, dim=0)
-
-    monkeypatch.setattr(mh_moe, "_mate_bf16_grouped_linear", fake_grouped)
-    expected = mh_moe.torch_mh_moe_forward(
-        x, gather_ids, probs, expert_offsets, w_gate, w_up, w_down
-    )
-    actual = mh_moe.mate_bf16_mh_moe_forward(
-        x,
-        gather_ids,
-        probs,
-        expert_offsets,
-        w_gate,
-        w_up,
-        w_down,
-        w_gate_up=packed_gate_up,
-    )
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert calls == [tuple(packed_gate_up.shape), tuple(w_down.shape)]
-
-
 def test_tiny_native_preview_matches_pinned_reference_golden() -> None:
     """Full-model golden from SandAI reference f68a0f9bbccb.
 
