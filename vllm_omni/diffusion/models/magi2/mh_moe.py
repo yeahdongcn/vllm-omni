@@ -87,7 +87,13 @@ def _global_sort_routes_impl(
     topk_probs: torch.Tensor,
     topk_indices: torch.Tensor,
     num_experts: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """Build the stable flattened-expert route layout and retain sort order."""
 
     if topk_probs.shape != topk_indices.shape or topk_indices.ndim != 3:
@@ -114,7 +120,7 @@ def _global_sort_routes_impl(
         )
     offsets = torch.zeros(heads * num_experts + 1, device=device, dtype=torch.long)
     offsets[1:] = counts.cumsum(0)
-    return gather_ids, sorted_probs, offsets, order
+    return gather_ids, sorted_probs, offsets, order, counts
 
 
 def global_sort_routes(
@@ -129,7 +135,7 @@ def global_sort_routes(
     the source head for every sorted route.
     """
 
-    gather_ids, sorted_probs, offsets, _ = _global_sort_routes_impl(
+    gather_ids, sorted_probs, offsets, _, _ = _global_sort_routes_impl(
         topk_probs, topk_indices, num_experts
     )
     return gather_ids, sorted_probs, offsets
@@ -149,7 +155,7 @@ def global_sort_routes_with_head_ids(
     ``repeat_interleave``-ing it to route length on every layer.
     """
 
-    gather_ids, sorted_probs, offsets, order = _global_sort_routes_impl(
+    gather_ids, sorted_probs, offsets, order, _ = _global_sort_routes_impl(
         topk_probs, topk_indices, num_experts
     )
     _, sequence, top_k = topk_indices.shape
@@ -158,6 +164,30 @@ def global_sort_routes_with_head_ids(
     else:
         sorted_head_ids = torch.div(order, sequence * top_k, rounding_mode="floor")
     return gather_ids, sorted_probs, offsets, sorted_head_ids
+
+
+def global_sort_routes_with_head_ids_and_counts(
+    topk_probs: torch.Tensor,
+    topk_indices: torch.Tensor,
+    num_experts: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Return sorted routes, source heads, and the already-built CSR counts."""
+
+    gather_ids, sorted_probs, offsets, order, counts = _global_sort_routes_impl(
+        topk_probs, topk_indices, num_experts
+    )
+    _, sequence, top_k = topk_indices.shape
+    if order.numel() == 0:
+        sorted_head_ids = order
+    else:
+        sorted_head_ids = torch.div(order, sequence * top_k, rounding_mode="floor")
+    return gather_ids, sorted_probs, offsets, sorted_head_ids, counts
 
 
 def torch_mh_moe_forward(
@@ -241,6 +271,68 @@ def _mate_bf16_grouped_linear(
     return output
 
 
+@torch.no_grad()
+def _pack_gate_up_parameter_storage(
+    w_gate: nn.Parameter,
+    w_up: nn.Parameter,
+) -> torch.Tensor | None:
+    """Alias gate/up parameters into one contiguous N-major backing tensor.
+
+    The checkpoint-facing parameters keep their original names and shapes,
+    but their views share one ``[E,K,2N]`` allocation.  This makes the fused
+    Mubin call memory-neutral after the one-time repack: retaining a second
+    packed cache for every MAGI layer would consume tens of GiB.  The helper
+    is deliberately conservative and returns ``None`` for non-MUSA, non-BF16,
+    non-contiguous, or mismatched parameters (for example, layerwise-offload
+    placeholders), allowing the caller to use the existing path.
+    """
+
+    if w_gate.ndim != 3 or w_gate.shape != w_up.shape:
+        return None
+    if w_gate.device.type != "musa" or w_gate.dtype != torch.bfloat16:
+        return None
+    if w_up.device != w_gate.device or w_up.dtype != w_gate.dtype:
+        return None
+    experts, k, n = w_gate.shape
+    packed_stride = (2 * k * n, 2 * n, 1)
+
+    # A previous invocation already installed the two N-major views.  Derive
+    # the full packed view from either parameter without retaining a separate
+    # Tensor attribute (which would confuse CPU staging/DLO bookkeeping).
+    try:
+        same_storage = (
+            w_gate.untyped_storage().data_ptr()
+            == w_up.untyped_storage().data_ptr()
+        )
+    except Exception:
+        same_storage = False
+    if (
+        same_storage
+        and w_gate.stride() == packed_stride
+        and w_up.stride() == packed_stride
+        and w_up.data_ptr() - w_gate.data_ptr() == n * w_gate.element_size()
+    ):
+        return w_gate.as_strided((experts, k, 2 * n), packed_stride)
+
+    # Do not repack a staged/offloaded view or an already transformed layout:
+    # the fused experiment is resident-only and must never add an implicit
+    # contiguous copy on the hot path.
+    if not w_gate.is_contiguous() or not w_up.is_contiguous():
+        return None
+
+    packed = torch.cat((w_gate.detach(), w_up.detach()), dim=-1).contiguous()
+    old_gate_data = w_gate.data
+    old_up_data = w_up.data
+    try:
+        w_gate.data = packed[..., :n]
+        w_up.data = packed[..., n:]
+    except Exception:
+        w_gate.data = old_gate_data
+        w_up.data = old_up_data
+        raise
+    return packed
+
+
 def mate_bf16_mh_moe_forward(
     x: torch.Tensor,
     gather_ids: torch.Tensor,
@@ -251,7 +343,9 @@ def mate_bf16_mh_moe_forward(
     w_down: torch.Tensor,
     *,
     backend: str = "mubin",
+    w_gate_up: torch.Tensor | None = None,
     sorted_head_ids: torch.Tensor | None = None,
+    token_counts: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Evaluate the routed MAGI-2 MoE with MATE's grouped BF16 GEMMs.
 
@@ -277,7 +371,17 @@ def mate_bf16_mh_moe_forward(
     if gather_ids.numel() == 0:
         return torch.zeros_like(x)
 
-    token_counts = torch.diff(expert_offsets).to(dtype=torch.int32).contiguous()
+    if token_counts is None:
+        token_counts = torch.diff(expert_offsets).to(dtype=torch.int32).contiguous()
+    else:
+        if (
+            token_counts.ndim != 1
+            or token_counts.numel() != num_flat_experts
+            or token_counts.device != x.device
+            or token_counts.dtype != torch.int32
+            or not token_counts.is_contiguous()
+        ):
+            raise ValueError("precomputed MAGI route counts have an incompatible layout")
     token_ids = gather_ids.to(dtype=torch.long)
     if sorted_head_ids is None:
         experts_per_head = num_flat_experts // x.shape[1]
@@ -294,20 +398,32 @@ def mate_bf16_mh_moe_forward(
     route_linear_ids = (token_ids * x.shape[1] + head_ids).contiguous()
     routed_input = x.contiguous().view(-1, x.shape[-1]).index_select(0, route_linear_ids)
 
-    gate = _mate_bf16_grouped_linear(
-        routed_input,
-        w_gate,
-        token_counts,
-        major_b_mode="N",
-        backend=backend,
-    )
-    up = _mate_bf16_grouped_linear(
-        routed_input,
-        w_up,
-        token_counts,
-        major_b_mode="N",
-        backend=backend,
-    )
+    if w_gate_up is None:
+        gate = _mate_bf16_grouped_linear(
+            routed_input,
+            w_gate,
+            token_counts,
+            major_b_mode="N",
+            backend=backend,
+        )
+        up = _mate_bf16_grouped_linear(
+            routed_input,
+            w_up,
+            token_counts,
+            major_b_mode="N",
+            backend=backend,
+        )
+    else:
+        if w_gate_up.ndim != 3 or w_gate_up.shape[:2] != w_gate.shape[:2]:
+            raise ValueError("packed MAGI gate/up weight has an incompatible shape")
+        gate_up = _mate_bf16_grouped_linear(
+            routed_input,
+            w_gate_up,
+            token_counts,
+            major_b_mode="N",
+            backend=backend,
+        )
+        gate, up = gate_up.split(w_gate.shape[-1], dim=-1)
     hidden = swiglu7_pair(gate, up)
     expert_output = _mate_bf16_grouped_linear(
         hidden,
@@ -691,13 +807,17 @@ class Magi2MultiHeadMoE(nn.Module):
             and x_heads.dtype == torch.bfloat16
         )
         sorted_head_ids: torch.Tensor | None = None
+        route_counts: torch.Tensor | None = None
         if use_mate:
             (
                 gather_ids,
                 sorted_probs,
                 offsets,
                 sorted_head_ids,
-            ) = global_sort_routes_with_head_ids(probabilities, indices, self.num_experts)
+                route_counts,
+            ) = global_sort_routes_with_head_ids_and_counts(
+                probabilities, indices, self.num_experts
+            )
         else:
             gather_ids, sorted_probs, offsets = global_sort_routes(
                 probabilities, indices, self.num_experts
@@ -715,6 +835,15 @@ class Magi2MultiHeadMoE(nn.Module):
                 # the same tensor as an MGroupedContiguous row-ID layout.
                 backend = "mubin"
             try:
+                gate_up_weight = None
+                if os.environ.get("MAGI2_USE_MATE_MOE_GATE_UP", "0") == "1":
+                    # This is a resident-only experiment.  The helper
+                    # replaces the two checkpoint Parameters' storage with
+                    # adjacent views, so it does not retain a second packed
+                    # copy per layer.
+                    gate_up_weight = _pack_gate_up_parameter_storage(
+                        self.W_gate, self.W_up
+                    )
                 return mate_bf16_mh_moe_forward(
                     x_heads,
                     gather_ids,
@@ -724,7 +853,9 @@ class Magi2MultiHeadMoE(nn.Module):
                     self.W_up,
                     self.W_down,
                     backend=backend,
+                    w_gate_up=gate_up_weight,
                     sorted_head_ids=sorted_head_ids,
+                    token_counts=route_counts,
                 )
             except Exception as exc:
                 if not _MATE_MOE_WARNED:
@@ -788,6 +919,7 @@ __all__ = [
     "compute_topk_probs_and_indices",
     "global_sort_routes",
     "global_sort_routes_with_head_ids",
+    "global_sort_routes_with_head_ids_and_counts",
     "torch_mh_moe_forward",
     "mate_bf16_mh_moe_forward",
     "triton_mh_moe_forward",
