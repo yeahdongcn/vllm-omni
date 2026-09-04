@@ -281,15 +281,14 @@ def _pack_gate_up_parameter_storage(
     The checkpoint-facing parameters keep their original names and shapes,
     but their views share one ``[E,K,2N]`` allocation.  This makes the fused
     Mubin call memory-neutral after the one-time repack: retaining a second
-    packed cache for every MAGI layer would consume tens of GiB.  The helper
-    is deliberately conservative and returns ``None`` for non-MUSA, non-BF16,
-    non-contiguous, or mismatched parameters (for example, layerwise-offload
-    placeholders), allowing the caller to use the existing path.
+    packed cache for every MAGI layer would consume tens of GiB.  The caller
+    invokes this helper only for resident MUSA parameters; keeping the helper
+    device-agnostic also lets the storage invariant be tested on CPU.
     """
 
     if w_gate.ndim != 3 or w_gate.shape != w_up.shape:
         return None
-    if w_gate.device.type != "musa" or w_gate.dtype != torch.bfloat16:
+    if w_gate.dtype != torch.bfloat16:
         return None
     if w_up.device != w_gate.device or w_up.dtype != w_gate.dtype:
         return None
