@@ -260,8 +260,55 @@ class MultiModalityRMSNorm(nn.Module):
         self,
         tensor: torch.Tensor,
         modality_dispatcher: ModalityDispatcher | None = None,
+        *,
+        out_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         original_dtype = tensor.dtype
+        target_dtype = out_dtype or self.out_dtype or original_dtype
+
+        # ``tensor.float(); square(); mean(); rsqrt()`` is a surprisingly large
+        # part of a MAGI-2 step on MUSA.  The MUSA implementation of
+        # ``aten.rms_norm`` performs the reduction and scale in one kernel.  Keep
+        # this guarded by an environment rollback switch; callers can set the
+        # variable to ``0`` to retain the checkpoint/reference path below.
+        fast_rms = (
+            os.environ.get("MAGI2_FAST_RMS_NORM", "1") == "1"
+            and os.environ.get("MAGI2_DETERMINISTIC", "0") != "1"
+            and tensor.device.type in {"musa", "privateuseone"}
+        )
+        if fast_rms:
+            compute_dtype = (
+                torch.float32 if target_dtype == torch.float32 else tensor.dtype
+            )
+            normalized_input = tensor.to(compute_dtype)
+            if self.num_modality == 1:
+                normalized = F.rms_norm(
+                    normalized_input,
+                    (self.dim,),
+                    None,
+                    self.eps,
+                )
+                weight = (
+                    self.weight.view(self.num_patterns, self.dim) + 1.0
+                ).to(compute_dtype)
+                return (normalized * weight).to(target_dtype)
+            if modality_dispatcher is None:
+                raise ValueError("modality_dispatcher is required for multimodal RMSNorm")
+            normalized = F.rms_norm(
+                normalized_input,
+                (self.dim,),
+                None,
+                self.eps,
+            )
+            weights = (
+                self.weight.view(self.num_modality, self.num_patterns, self.dim) + 1.0
+            ).to(compute_dtype)
+            inputs = modality_dispatcher.dispatch(normalized)
+            result = modality_dispatcher.undispatch(
+                *(part * weights[index] for index, part in enumerate(inputs))
+            )
+            return result.to(target_dtype)
+
         normalized = tensor.float()
         normalized = normalized * torch.rsqrt(normalized.square().mean(dim=-1, keepdim=True) + self.eps)
         if self.num_modality == 1:
@@ -275,7 +322,7 @@ class MultiModalityRMSNorm(nn.Module):
             result = modality_dispatcher.undispatch(
                 *(part * (weights[index] + 1.0) for index, part in enumerate(inputs))
             )
-        return result.to(self.out_dtype or original_dtype)
+        return result.to(target_dtype)
 
 
 def _frequency_bands(
@@ -379,6 +426,31 @@ class MHCHandler:
         self.sinkhorn_epsilon = sinkhorn_epsilon
         self.dtype = dtype
         self.matmul_scale = 1.0 / math.sqrt(float(num_streams * hidden_size))
+        self._phi_fused_bf16: dict[int, tuple[tuple[int, int], torch.Tensor]] = {}
+
+    @staticmethod
+    def _parameter_source(parameter: torch.Tensor) -> tuple[int, int]:
+        try:
+            version = parameter._version
+        except RuntimeError:
+            version = -1
+        return parameter.data_ptr(), version
+
+    def _bf16_phi(self, phi_fused: torch.Tensor) -> torch.Tensor:
+        """Cache the tiny BF16 projection matrix without changing state dicts."""
+        key = id(phi_fused)
+        source = self._parameter_source(phi_fused)
+        cached = self._phi_fused_bf16.get(key)
+        if (
+            cached is None
+            or cached[0] != source
+            or cached[1].device != phi_fused.device
+            or cached[1].shape != phi_fused.shape
+        ):
+            value = phi_fused.detach().to(dtype=torch.bfloat16).contiguous()
+            self._phi_fused_bf16[key] = (source, value)
+            return value
+        return cached[1]
 
     def flatten(self, tensor: torch.Tensor) -> torch.Tensor:
         self._check_multi(tensor)
@@ -392,7 +464,23 @@ class MHCHandler:
     ) -> MHCTensorTuple:
         if flattened.ndim != 2 or flattened.shape[-1] != self.num_streams * self.hidden_size:
             raise ValueError("invalid flattened mHC shape")
-        fused = norm(flattened).to(self.dtype) @ phi_fused
+        normalized = norm(flattened)
+        use_bf16 = (
+            os.environ.get("MAGI2_MHC_BF16_PROJECT", "1") == "1"
+            and os.environ.get("MAGI2_DETERMINISTIC", "0") != "1"
+            and flattened.device.type in {"musa", "privateuseone"}
+            and self.num_streams == 4
+            and flattened.ndim == 2
+            and flattened.shape[-1] == self.num_streams * self.hidden_size
+            and phi_fused.dtype == torch.float32
+        )
+        if use_bf16:
+            fused = (
+                normalized.to(dtype=torch.bfloat16)
+                @ self._bf16_phi(phi_fused)
+            ).float()
+        else:
+            fused = normalized.to(self.dtype) @ phi_fused
         pre, post, residual = torch.split(
             fused,
             (self.num_streams, self.num_streams, self.num_streams**2),
@@ -410,6 +498,14 @@ class MHCHandler:
         self._check_multi(streams)
         alpha, bias, logits = alpha_bias_logits
         coefficients = torch.sigmoid(alpha * self.matmul_scale * logits + bias.unsqueeze(0))
+        if (
+            os.environ.get("MAGI2_MHC_FAST_MIX", "1") == "1"
+            and os.environ.get("MAGI2_DETERMINISTIC", "0") != "1"
+            and streams.device.type in {"musa", "privateuseone"}
+            and streams.dtype == torch.bfloat16
+            and streams.shape[1] == 4
+        ):
+            return (coefficients.to(streams.dtype).unsqueeze(-1) * streams).sum(dim=1)
         return torch.einsum("tn,tnc->tc", coefficients.to(out_dtype or streams.dtype), streams)
 
     def compute_post_residual(

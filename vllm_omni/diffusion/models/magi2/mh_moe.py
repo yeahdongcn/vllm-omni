@@ -13,6 +13,7 @@ whole-token :class:`FusedMoE` primitive.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import math
 import os
@@ -23,7 +24,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm_omni.platforms import current_omni_platform
 from vllm.triton_utils import tl, triton
 
 from vllm_omni.platforms import current_omni_platform
@@ -34,6 +34,236 @@ RoutingScore = Literal["softmax", "sigmoid"]
 
 logger = logging.getLogger(__name__)
 _MATE_MOE_WARNED = False
+_SGL_FUSED_MOE_MODULE = None
+_SGL_FUSED_MOE_WORKSPACES: dict[tuple, torch.Tensor] = {}
+
+
+def _magi2_align_block_size(
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return SGLang-compatible sorted route metadata on MUSA.
+
+    The vLLM CUDA extension exposes an in-place align op, but the MUSA image
+    used for MAGI-2 does not load ``_moe_C``.  Keep a device-side fallback so
+    the fused path remains usable while an AOT MUSA align op is upstreamed.
+    """
+    ids = topk_ids.reshape(-1).to(torch.int32)
+    try:
+        from vllm._custom_ops import moe_align_block_size
+
+        capacity = ids.numel() + num_experts * block_size
+        sorted_ids = torch.empty((capacity,), device=ids.device, dtype=torch.int32)
+        expert_ids = torch.empty(
+            (capacity // block_size,), device=ids.device, dtype=torch.int32
+        )
+        num_padded = torch.empty((1,), device=ids.device, dtype=torch.int32)
+        moe_align_block_size(
+            ids,
+            num_experts,
+            block_size,
+            sorted_ids,
+            expert_ids,
+            num_padded,
+        )
+        n = int(num_padded.item())
+        return sorted_ids[:n], expert_ids[: n // block_size], num_padded
+    except Exception:
+        # MUSA builds may expose the Python wrapper without the CUDA `_moe_C`
+        # extension.  This implementation intentionally stays on-device.
+        order = torch.argsort(ids)
+        sorted_experts = ids[order]
+        counts = torch.bincount(ids, minlength=num_experts)
+        padded_counts = ((counts + block_size - 1) // block_size) * block_size
+        total = int(padded_counts.sum().item())
+        sorted_ids = torch.full(
+            (total,), ids.numel(), device=ids.device, dtype=torch.int32
+        )
+        starts = torch.cumsum(padded_counts, 0) - padded_counts
+        ends = torch.cumsum(counts, 0)
+        begins = ends - counts
+        positions = torch.arange(ids.numel(), device=ids.device, dtype=torch.int64)
+        experts = sorted_experts.to(torch.int64)
+        destinations = starts[experts] + positions - begins[experts]
+        sorted_ids[destinations] = order.to(torch.int32)
+        expert_ids = torch.repeat_interleave(
+            torch.arange(num_experts, device=ids.device, dtype=torch.int32),
+            padded_counts // block_size,
+        )
+        return (
+            sorted_ids,
+            expert_ids,
+            torch.tensor(total, device=ids.device, dtype=torch.int32),
+        )
+
+
+def _magi2_sgl_fused_moe_module():
+    global _SGL_FUSED_MOE_MODULE
+    if _SGL_FUSED_MOE_MODULE is None:
+        _SGL_FUSED_MOE_MODULE = importlib.import_module(
+            "vllm_omni.diffusion.models.magi2.sgl_fused_moe_kernels"
+        )
+    return _SGL_FUSED_MOE_MODULE
+
+
+def _magi2_sgl_fused_moe_forward(
+    x_heads: torch.Tensor,
+    probabilities: torch.Tensor,
+    indices: torch.Tensor,
+    w_gate: torch.Tensor,
+    w_up: torch.Tensor,
+    w_down: torch.Tensor,
+) -> torch.Tensor:
+    """SGLang-compatible fused SwiGLU MoE for MAGI-2's head-routed layout."""
+    if x_heads.ndim != 3 or probabilities.ndim != 3 or indices.ndim != 3:
+        raise ValueError("unexpected MAGI-2 MoE tensor rank")
+    num_tokens, num_heads, hidden_size = x_heads.shape
+    top_k = probabilities.shape[-1]
+    if top_k != 6:
+        raise ValueError(f"SGLang MAGI-2 path expects top_k=6, got {top_k}")
+    num_experts_per_head = w_gate.shape[0] // num_heads
+    intermediate_size = w_gate.shape[-1]
+    num_experts = w_gate.shape[0]
+    # The generic fused kernel consumes one row per (head, token), with expert
+    # IDs offset into the flattened head-local expert table.
+    hidden = x_heads.permute(1, 0, 2).contiguous().reshape(
+        num_heads * num_tokens, hidden_size
+    )
+    route_weights = probabilities.permute(0, 1, 2).contiguous().reshape(
+        num_heads * num_tokens, top_k
+    )
+    route_ids = indices.to(torch.int32).contiguous()
+    route_ids = (
+        route_ids
+        + torch.arange(num_heads, device=route_ids.device, dtype=torch.int32)
+        .view(num_heads, 1, 1)
+        .mul(num_experts_per_head)
+    ).reshape(num_heads * num_tokens, top_k)
+    sorted_ids, expert_ids, num_padded = _magi2_align_block_size(
+        route_ids, num_experts, 128
+    )
+
+    # W13 is packed only into one per-process scratch buffer.  Keeping this
+    # buffer out of each layer avoids a resident ~1 GB duplicate for all 36
+    # MAGI-2 MoE layers; the model invokes layers serially on each rank.
+    key = (
+        str(w_gate.device),
+        w_gate.dtype,
+        num_experts,
+        intermediate_size,
+        hidden_size,
+    )
+    packed = _SGL_FUSED_MOE_WORKSPACES.get(key)
+    shape = (num_experts, 2 * intermediate_size, hidden_size)
+    if packed is None or tuple(packed.shape) != shape:
+        packed = torch.empty(shape, device=w_gate.device, dtype=w_gate.dtype)
+        _SGL_FUSED_MOE_WORKSPACES[key] = packed
+    packed_view = packed.view(num_experts, intermediate_size, 2, hidden_size)
+    packed_view[:, :, 0, :].copy_(w_gate.transpose(1, 2))
+    packed_view[:, :, 1, :].copy_(w_up.transpose(1, 2))
+
+    kernels = _magi2_sgl_fused_moe_module()
+    import triton.language as tl
+
+    config = {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 32,
+        "GROUP_SIZE_M": 16,
+        "num_warps": 16,
+        "num_stages": 1,
+    }
+    # The aligner pads each expert to a full tile.  The generic MUSA kernel
+    # does not guarantee writes for sentinel rows on every Triton revision;
+    # zero-initialize them so padded routes cannot leak uninitialized values
+    # into the down-projection (notably the audio branch).
+    intermediate = torch.zeros(
+        (int(num_padded.item()), intermediate_size),
+        device=x_heads.device,
+        dtype=x_heads.dtype,
+    )
+    kernels.invoke_fused_moe_kernel(
+        hidden,
+        packed,
+        None,
+        intermediate,
+        None,
+        None,
+        None,
+        route_weights,
+        route_ids,
+        sorted_ids,
+        expert_ids,
+        num_padded,
+        False,
+        top_k,
+        config,
+        tl.bfloat16,
+        False,
+        False,
+        False,
+        False,
+        False,
+        no_combine=True,
+        c_sorted=False,
+        filter_expert=True,
+        fuse_swiglu=True,
+        swiglu_alpha=1.702,
+        swiglu_limit=7.0,
+    )
+    route_output = torch.zeros(
+        (hidden.shape[0], top_k, hidden_size),
+        device=hidden.device,
+        dtype=hidden.dtype,
+    )
+    kernels.invoke_fused_moe_kernel(
+        intermediate,
+        # The fused kernel follows SGLang's convention for W2: [E, K, N]
+        # (output/hidden dimension first).  MAGI-2 stores W_down as
+        # [E, N, K], so expose the transposed view here.
+        w_down.transpose(1, 2),
+        None,
+        route_output,
+        None,
+        None,
+        None,
+        route_weights,
+        route_ids,
+        sorted_ids,
+        expert_ids,
+        num_padded,
+        True,
+        1,
+        config,
+        tl.bfloat16,
+        False,
+        False,
+        False,
+        False,
+        False,
+        no_combine=False,
+        c_sorted=False,
+        filter_expert=True,
+    )
+    # SGLang's MUSA AOT ``moe_sum_reduce`` combines the six routed rows in
+    # one custom kernel.  Use the equivalent reduction while we keep the
+    # adapter self-contained; this is a single device reduction and leaves a
+    # clean seam for replacing it with the AOT op when available in the image.
+    output = torch.empty(
+        (hidden.shape[0], hidden_size), device=hidden.device, dtype=hidden.dtype
+    )
+    used_fast_sum = False
+    if os.environ.get("MAGI2_USE_MUSA_MOE_SUM", "1") == "1":
+        try:
+            from vllm_musa.jit_kernel.csrc.moe import maybe_fast_moe_sum
+
+            used_fast_sum = maybe_fast_moe_sum(route_output, output)
+        except Exception as exc:
+            logger.debug("MUSA MoE sum-reduce unavailable: %s", exc)
+    if not used_fast_sum:
+        output.copy_(route_output.sum(dim=1))
+    return output.view(num_heads, num_tokens, hidden_size).permute(1, 0, 2).contiguous()
 
 
 def swiglu7_pair(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
@@ -718,6 +948,28 @@ class Magi2MultiHeadMoE(nn.Module):
     def _local_forward(self, x_heads: torch.Tensor) -> torch.Tensor:
         global _MATE_MOE_WARNED
         probabilities, indices = self._route(x_heads)
+        use_sgl_fused = (
+            os.environ.get("MAGI2_USE_SGL_FUSED_MOE", "1") == "1"
+            and x_heads.device.type in {"musa", "privateuseone"}
+            and x_heads.dtype == torch.bfloat16
+            and os.environ.get("MAGI2_DETERMINISTIC", "0") != "1"
+        )
+        if use_sgl_fused:
+            try:
+                return _magi2_sgl_fused_moe_forward(
+                    x_heads,
+                    probabilities,
+                    indices,
+                    self.W_gate,
+                    self.W_up,
+                    self.W_down,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "SGLang-compatible fused MAGI-2 MoE path failed; "
+                    "falling back to the configured route: %s",
+                    exc,
+                )
         use_mate = (
             os.environ.get("MAGI2_USE_MATE_MOE", "0") == "1"
             and x_heads.device.type == "musa"
@@ -812,6 +1064,11 @@ class Magi2MultiHeadMoE(nn.Module):
             x_heads = torch.cat((x_heads, padding), dim=1)
         resolved_split_sizes: list[int] | None = None
         if self.ep_group.world_size > 1:
+            # ``sequence_split_sizes`` is normally produced by the SP group
+            # (world=8), while the experimental EP group may contain only a
+            # contiguous subset (world=4).  Select the entries belonging to
+            # this EP group's global ranks before issuing all-to-all.
+            global_ranks = getattr(self.ep_group, "global_ranks", None)
             if sequence_split_sizes is None:
                 local_size = torch.tensor([x_heads.shape[0]], dtype=torch.int64, device=x_heads.device)
                 gathered_sizes = [torch.empty_like(local_size) for _ in range(self.ep_group.world_size)]
@@ -820,9 +1077,17 @@ class Magi2MultiHeadMoE(nn.Module):
             elif isinstance(sequence_split_sizes, torch.Tensor):
                 if sequence_split_sizes.device.type != "cpu":
                     raise ValueError("sequence_split_sizes tensor must be CPU-resident")
-                resolved_split_sizes = [int(size) for size in sequence_split_sizes.tolist()]
+                raw_split_sizes = [int(size) for size in sequence_split_sizes.tolist()]
+                if global_ranks is not None and len(raw_split_sizes) != self.ep_group.world_size:
+                    resolved_split_sizes = [raw_split_sizes[index] for index in global_ranks]
+                else:
+                    resolved_split_sizes = raw_split_sizes
             else:
-                resolved_split_sizes = [int(size) for size in sequence_split_sizes]
+                raw_split_sizes = [int(size) for size in sequence_split_sizes]
+                if global_ranks is not None and len(raw_split_sizes) != self.ep_group.world_size:
+                    resolved_split_sizes = [raw_split_sizes[index] for index in global_ranks]
+                else:
+                    resolved_split_sizes = raw_split_sizes
             if (
                 len(resolved_split_sizes) != self.ep_group.world_size
                 or any(size < 0 for size in resolved_split_sizes)

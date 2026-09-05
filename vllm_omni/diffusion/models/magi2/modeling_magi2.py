@@ -490,9 +490,22 @@ class Magi2TransformerLayer(nn.Module):
         branch: str,
         dispatcher: ModalityDispatcher,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        norm_dtype = None
+        if (
+            os.environ.get("MAGI2_MHC_BF16_NORM", "1") == "1"
+            and os.environ.get("MAGI2_DETERMINISTIC", "0") != "1"
+            and streams.device.type in {"musa", "privateuseone"}
+            and streams.dtype == torch.bfloat16
+            and streams.shape[1] == self.config.mhc.num_streams == 4
+        ):
+            norm_dtype = torch.bfloat16
         return self.mhc_handler.compute_logits(
             self.mhc_handler.flatten(streams),
-            partial(self.mhc_norm, modality_dispatcher=dispatcher),
+            partial(
+                self.mhc_norm,
+                modality_dispatcher=dispatcher,
+                out_dtype=norm_dtype,
+            ),
             getattr(self, f"mhc_phi_fused_{branch}"),
         )
 
