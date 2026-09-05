@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 
 import torch
@@ -165,7 +165,10 @@ class MUSAOmniPlatform(OmniPlatform, MUSAPlatformBase):
     @classmethod
     def record_device_event(cls) -> torch.Event | None:
         try:
-            event = torch.musa.Event()
+            # ``torch.Stream.wait_event`` consumes the backend-neutral event
+            # wrapper. A native ``torch.musa.Event`` is not observed by the
+            # generic stream used by the asynchronous D2H output path.
+            event = torch.Event()
             event.record()
             return event
         except Exception:
@@ -190,7 +193,10 @@ class MUSAOmniPlatform(OmniPlatform, MUSAPlatformBase):
     def set_device_control_env_var(cls, devices: str | int | None) -> None:
         import os
 
-        os.environ["MUSA_VISIBLE_DEVICES"] = devices
+        if devices is None:
+            os.environ.pop("MUSA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["MUSA_VISIBLE_DEVICES"] = str(devices)
 
     @classmethod
     def unset_device_control_env_var(cls) -> None:

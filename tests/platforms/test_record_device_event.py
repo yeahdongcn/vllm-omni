@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Unit tests for OmniPlatform.record_device_event implementations."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from tests.helpers.mark import hardware_test
@@ -103,6 +105,27 @@ class TestXPUOmniPlatformRecordDeviceEvent:
 
         copied_early = int((host != 7.0).sum())
         assert copied_early == 0, f"{copied_early} elements copied before compute finished"
+
+
+class TestMusaOmniPlatformRecordDeviceEvent:
+    """MUSA events must be consumable by the generic output-copy stream."""
+
+    def test_records_device_agnostic_torch_event(self, monkeypatch):
+        pytest.importorskip("torch_musa")
+        import torch
+
+        from vllm_omni.platforms.musa.platform import MUSAOmniPlatform
+
+        mock_event = MagicMock()
+        musa_event = MagicMock()
+        monkeypatch.setattr(torch, "Event", lambda: mock_event)
+        monkeypatch.setattr(torch.musa, "Event", musa_event)
+
+        result = MUSAOmniPlatform.record_device_event()
+
+        assert result is mock_event
+        mock_event.record.assert_called_once()
+        musa_event.assert_not_called()
 
 
 class TestNPUOmniPlatformRecordDeviceEvent:

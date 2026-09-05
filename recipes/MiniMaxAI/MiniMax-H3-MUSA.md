@@ -89,6 +89,12 @@ vllm serve "${MODEL_ROOT}" \
   --init-timeout 1800
 ```
 
+The MUSA async video-output path uses a backend-neutral `torch.Event` for the
+device-to-host copy. This is required on MUSA: a native `torch.musa.Event` is
+not observed by the generic output-copy stream and can produce valid MP4 files
+whose pixels are mosaic/static on a subsequent request. Use a checkout that
+contains the MUSA event fix; do not work around it by changing BF16 to FP32.
+
 The text encoder uses TP2 on devices 0-1. The diffusion stage uses TP4 and
 four-way Video VAE patch parallelism on devices 2-5. Devices 6-7 remain
 available for runtime headroom. Replicating the full DiT with TP1/Ulysses4 can
@@ -128,13 +134,17 @@ installed and validated; the dense FastH3 adapter works with the MUSA
 `FLASH_ATTN` backend.
 
 An S5000 validation on 2026-09-05 used vLLM 0.28.0, vLLM-MUSA 0.1.28,
-vLLM-Omni main at `0f9ee6af`, torch 2.11.0/MUSA 5.2, and the configuration
-above. For a 1344x768, 24 fps, 15-second T2VA request, regular H3 at 50 steps
-took 1152.22 seconds, while three measured dense FastH3 four-step requests had
-a median client completion time of 110.89 seconds (10.39x faster). All outputs
-decoded as 1344x768 H.264 plus AAC, 362 frames, and 15.084 seconds. These
-figures describe this exact software and hardware profile, not a general
-latency guarantee.
+vLLM-Omni main at `0f9ee6af` plus the MUSA event fix, and torch
+2.11.0/MUSA 5.2. For a 1344x768, 24 fps, 15-second T2VA request, regular H3 at
+50 steps took 1152.22 seconds, while three measured dense FastH3 four-step
+requests had a median client completion time of 110.89 seconds (10.39x
+faster). The corrected service was then exercised with a 4-second warmup,
+two consecutive 15-second FastH3 requests (seeds 1501 and 1502), and repeated
+same-shape requests; all returned visually coherent frames, including the
+second request. Before the event fix, the second identical request produced a
+structurally valid but mosaic/static MP4, so MP4 metadata alone is not a
+correctness gate. These figures describe this exact software and hardware
+profile, not a general latency guarantee.
 
 ### Partition server (v0.28 release profile)
 

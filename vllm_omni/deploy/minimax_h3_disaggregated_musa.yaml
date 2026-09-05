@@ -1,4 +1,6 @@
 # MiniMax H3 on one 8-GPU MUSA node.
+# Requires the MUSA backend-neutral device-event fix for async video output.
+# Without it, a second request can produce a structurally valid mosaic video.
 #
 # The text encoder uses two devices. The diffusion stage uses tensor parallel
 # across four devices so each rank holds a shard of the DiT while the Video VAE
