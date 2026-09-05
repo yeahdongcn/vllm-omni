@@ -78,18 +78,29 @@ def _musa_mate_flash_attn_varlen(
     if sink is not None and sink.shape[0] != 1:
         logger.warning("MATE FA sink adapter supports one sink token; using chunked Torch fallback")
         return None
+    backend = os.environ.get("MAGI2_MATE_FA_BACKEND", "auto")
     try:
-        from flash_attn_3.interface import flash_attn_varlen_func
+        if backend != "auto":
+            # The public FA3 shim intentionally omits MATE's backend selector.
+            # Use the underlying interface only for diagnostics that need an
+            # explicit string backend (for example regional compile), avoiding
+            # the bool/string coercion bug in MATE 0.2.6's auto selector.
+            from mate.mha_interface import flash_attn_varlen_func
+
+            explicit_backend = backend
+        else:
+            from flash_attn_3.interface import flash_attn_varlen_func
+
+            explicit_backend = None
     except (ImportError, ModuleNotFoundError):
         try:
             from flash_attn_interface import flash_attn_varlen_func
+
+            explicit_backend = None
         except (ImportError, ModuleNotFoundError):
             return None
     sinks = None if sink is None else sink[0].to(device=q.device, dtype=q.dtype).contiguous()
-    result = flash_attn_varlen_func(
-        q,
-        k,
-        v,
+    kwargs = dict(
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
         max_seqlen_q=max_seqlen_q,
@@ -101,6 +112,11 @@ def _musa_mate_flash_attn_varlen(
         return_softmax_lse=False,
         sinks=sinks,
     )
+    if explicit_backend is not None:
+        kwargs.pop("sinks", None)
+        kwargs["learnable_sink"] = sinks
+        kwargs["backend"] = explicit_backend
+    result = flash_attn_varlen_func(q, k, v, **kwargs)
     if isinstance(result, tuple):
         result = result[0]
     if not isinstance(result, torch.Tensor):
