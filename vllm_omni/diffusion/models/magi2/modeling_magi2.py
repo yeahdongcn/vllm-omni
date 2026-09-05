@@ -641,6 +641,11 @@ class Magi2PreviewTransformer(nn.Module):
         self.block = Magi2TransformerBlock(self.config)
         if os.environ.get("MAGI2_ENABLE_REGIONAL_COMPILE", "0") == "1":
             self._repeated_blocks = ["Magi2TransformerLayer"]
+            # Each MAGI-2 layer has its own mHC parameter widths.  Dynamo's
+            # default parameter-shape guard therefore recompiles the regional
+            # graph for every layer; the dynamic regional experiment must allow
+            # those parameter shapes to vary.
+            torch._dynamo.config.force_parameter_static_shapes = False
         # SP doubles as MAGI's MoE-head parallel axis. These modules therefore
         # contain different checkpoint slices on each SP rank and must remain
         # rank-local while HSDP shards the replicated parameters around them.
