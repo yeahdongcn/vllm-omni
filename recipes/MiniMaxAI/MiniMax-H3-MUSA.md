@@ -8,8 +8,8 @@
 - Model: [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3)
 - Tasks: T2VA, FL2VA, and Ref2VA
 - Mode: OpenAI-compatible `/v1/videos` HTTP serving
-- Hardware: 4x Moore Threads MTT S5000 for the validated Ref2VA profile; six
-  GPUs on one eight-GPU S5000 node for the disaggregated T2VA/FastH3 profile
+- Hardware: 8x Moore Threads MTT S5000 for dense FastH3 T2VA; four GPUs
+  for the Ref2VA profile; six GPUs for the alternative disaggregated profile
 - Maintainer: Community
 
 This recipe adapts [MiniMax-H3.md](MiniMax-H3.md) for MUSA environments.
@@ -65,11 +65,52 @@ soundfile. Formats that libsndfile cannot read are demuxed through ffmpeg.
 
 ## Start a server
 
-### Current main: disaggregated T2VA/FL2VA
+### Eight-GPU dense FastH3 T2VA
 
-Current `main` resolves the modular MiniMax H3 model through an explicit deploy
-configuration. On an eight-GPU S5000 node, use the MUSA configuration rather
-than the CUDA-oriented TP1/Ulysses4 configuration:
+For a fixed 1344x768, 15-second workload, use all eight GPUs for DiT tensor
+parallelism, text-encoder tensor parallelism, and VAE patch parallelism:
+
+```bash
+export MODEL_ROOT=/path/to/MiniMax-H3
+export FASTH3_LORA=/path/to/FastVideo-FastH3-4-step-Preview-v1-LoRA/dense-datafree/adapter_model.safetensors
+export MUSA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES="${MUSA_VISIBLE_DEVICES}"
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+vllm-omni serve "${MODEL_ROOT}" \
+  --omni --host 0.0.0.0 --port 8092 --trust-remote-code \
+  --task-type fl2va \
+  --num-gpus 8 --tensor-parallel-size 8 --usp 1 --ring 1 \
+  --text-encoder-tp-size 8 \
+  --vae-patch-parallel-size 8 --vae-parallel-mode tile --vae-use-tiling \
+  --diffusion-attention-backend FLASH_ATTN \
+  --lora-path "${FASTH3_LORA}" \
+  --no-diffusion-compile-dynamic
+```
+
+The server loads the FL2VA partition, but the dense four-step FastH3 adapter
+supports **T2VA requests only**. Set `num_inference_steps=4` and
+`extra_params={"task":"t2va","duration":15}` when submitting a request.
+Keep BF16 weights, and do not enable CPU offload for this adapter.
+
+`--no-diffusion-compile-dynamic` specializes regional compilation for the
+observed shapes. Warm up with the same resolution and duration before timing;
+new shapes can trigger compilation again. This setting has been checked for
+the fixed shape above, not for the cold latency of mixed-duration traffic.
+
+On 2026-09-05, TP8/TE8/VAE8 testing with vLLM 0.28.0, vLLM-MUSA 0.1.28,
+torch 2.11.0.post1/MUSA 5.2, MATE 0.2.6, and the MUSA event fix measured
+about 54.3 seconds per 15-second request with static compilation, compared
+with about 58.9 seconds with dynamic compilation. Each configuration used
+one same-shape warmup followed by three synchronous requests, with model
+loading excluded. The three measured static outputs matched the dynamic
+baseline MP4 byte-for-byte. These timings use dense FlashAttention and the
+dense adapter; they are not VSA results.
+
+### Disaggregated T2VA/FL2VA (TE2 + DiT4)
+
+For separate text-encoder and diffusion stages, use the MUSA deploy
+configuration on an eight-GPU S5000 node:
 
 ```bash
 export MODEL_ROOT=/path/to/MiniMax-H3
@@ -133,18 +174,16 @@ MUSA dependency. Do not select `FASTVIDEO_VSA` unless a MUSA implementation is
 installed and validated; the dense FastH3 adapter works with the MUSA
 `FLASH_ATTN` backend.
 
-An S5000 validation on 2026-09-05 used vLLM 0.28.0, vLLM-MUSA 0.1.28,
-vLLM-Omni main at `0f9ee6af` plus the MUSA event fix, and torch
-2.11.0/MUSA 5.2. For a 1344x768, 24 fps, 15-second T2VA request, regular H3 at
-50 steps took 1152.22 seconds, while three measured dense FastH3 four-step
-requests had a median client completion time of 110.89 seconds (10.39x
-faster). The corrected service was then exercised with a 4-second warmup,
+An S5000 correctness validation on 2026-09-05 used vLLM 0.28.0,
+vLLM-MUSA 0.1.28, vLLM-Omni main at `0f9ee6af` plus the MUSA event fix,
+and torch 2.11.0/MUSA 5.2. The corrected service was exercised with a 4-second warmup,
 two consecutive 15-second FastH3 requests (seeds 1501 and 1502), and repeated
 same-shape requests; all returned visually coherent frames, including the
 second request. Before the event fix, the second identical request produced a
 structurally valid but mosaic/static MP4, so MP4 metadata alone is not a
-correctness gate. These figures describe this exact software and hardware
-profile, not a general latency guarantee.
+correctness gate. The eight-GPU timings above use the corrected output
+path; historical timings from before that fix are not a quality-matched
+performance comparison.
 
 ### Partition server (v0.28 release profile)
 
