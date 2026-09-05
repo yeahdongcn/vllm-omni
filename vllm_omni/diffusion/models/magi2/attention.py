@@ -37,6 +37,14 @@ from .parallel import (
 logger = logging.getLogger(__name__)
 
 
+def _regional_compile_opaque(fn):
+    """Keep MATE/collective attention outside Dynamo for diagnostics."""
+
+    if os.environ.get("MAGI2_DISABLE_ATTENTION_COMPILE") == "1":
+        return torch.compiler.disable(fn)
+    return fn
+
+
 @cache
 def _resolve_flash_attn_version() -> int:
     """Apply MAGI-2's operator override to the shared FA2/FA3/FA4 resolver."""
@@ -365,6 +373,7 @@ class Magi2PackedAttentionKernel(nn.Module):
         super().__init__()
         self.softcap = softcap
 
+    @_regional_compile_opaque
     def forward(
         self,
         query: torch.Tensor,
