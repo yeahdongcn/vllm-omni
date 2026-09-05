@@ -83,8 +83,7 @@ def _musa_mate_flash_attn_varlen(
         if backend != "auto":
             # The public FA3 shim intentionally omits MATE's backend selector.
             # Use the underlying interface only for diagnostics that need an
-            # explicit string backend (for example regional compile), avoiding
-            # the bool/string coercion bug in MATE 0.2.6's auto selector.
+            # explicit string backend (for example regional compile).
             from mate.mha_interface import flash_attn_varlen_func
 
             explicit_backend = backend
