@@ -252,12 +252,12 @@ def _magi2_sgl_fused_moe_forward(
     import triton.language as tl
 
     config = {
-        "BLOCK_SIZE_M": 128,
-        "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 32,
-        "GROUP_SIZE_M": 16,
-        "num_warps": 16,
-        "num_stages": 1,
+        "BLOCK_SIZE_M": int(os.environ.get("MAGI2_SGL_BLOCK_M", "128")),
+        "BLOCK_SIZE_N": int(os.environ.get("MAGI2_SGL_BLOCK_N", "128")),
+        "BLOCK_SIZE_K": int(os.environ.get("MAGI2_SGL_BLOCK_K", "32")),
+        "GROUP_SIZE_M": int(os.environ.get("MAGI2_SGL_GROUP_M", "16")),
+        "num_warps": int(os.environ.get("MAGI2_SGL_NUM_WARPS", "16")),
+        "num_stages": int(os.environ.get("MAGI2_SGL_NUM_STAGES", "1")),
     }
     # The aligner pads each expert to a full tile.  The generic MUSA kernel
     # does not guarantee writes for sentinel rows on every Triton revision;
