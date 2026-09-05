@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 """
 Test script for FlashAttention backend with padding handling.
@@ -27,6 +27,55 @@ pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, pytest.mark.cpu]
 is_gpu = current_omni_platform.is_cuda_alike() or current_omni_platform.is_xpu()
 HAS_FLASH_ATTN = fa.HAS_FLASH_ATTN
 flash_attn_func = fa.flash_attn_func  # noqa: N813
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not current_omni_platform.is_musa(), reason="MUSA varlen parity test requires MUSA")
+def test_musa_packed_varlen_matches_document_reference():
+    """Verify MUSA FA3 keeps document boundaries for packed varlen inputs."""
+    varlen_func = fa.flash_attn_varlen_func
+    if varlen_func is None:
+        pytest.skip("MUSA FlashAttention varlen function is unavailable")
+
+    device = torch.device(current_omni_platform.device_type)
+    dtype = torch.bfloat16
+    num_heads, head_dim = 2, 64
+    lengths = [8, 4]
+    total_tokens = sum(lengths)
+
+    torch.manual_seed(60108)
+    q = torch.randn(total_tokens, num_heads, head_dim, device=device, dtype=dtype)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    cu_seqlens = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], device=device, dtype=torch.int32)
+
+    output = varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens,
+        cu_seqlens,
+        max(lengths),
+        max(lengths),
+        causal=False,
+        softmax_scale=head_dim**-0.5,
+    )
+    if isinstance(output, tuple):
+        output = output[0]
+
+    reference = torch.empty_like(output)
+    start = 0
+    for length in lengths:
+        end = start + length
+        q_doc = q[start:end].float().transpose(0, 1)
+        k_doc = k[start:end].float().transpose(0, 1)
+        v_doc = v[start:end].float().transpose(0, 1)
+        reference[start:end] = (
+            (torch.softmax(q_doc @ k_doc.transpose(-2, -1) / head_dim**0.5, dim=-1) @ v_doc).transpose(0, 1).to(dtype)
+        )
+        start = end
+
+    torch.testing.assert_close(output.float(), reference.float(), rtol=2e-2, atol=2e-2)
 
 
 def create_attention_mask(batch_size: int, seq_len: int, valid_len: int, device: torch.device) -> torch.Tensor:
