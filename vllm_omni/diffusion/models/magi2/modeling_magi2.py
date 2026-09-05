@@ -639,6 +639,12 @@ class Magi2PreviewTransformer(nn.Module):
         self.pre_adapter = Magi2PreAdapter(self.config)
         self.post_adapter = Magi2PostAdapter(self.config)
         self.block = Magi2TransformerBlock(self.config)
+        # Regional compile is intentionally opt-in for MAGI-2.  The repeated
+        # layer contains dynamic varlen attention and expert-parallel routing;
+        # keeping the switch environment-gated lets us probe the current MUSA
+        # custom-op boundaries without changing the production default.
+        if os.environ.get("MAGI2_ENABLE_REGIONAL_COMPILE", "0") == "1":
+            self._repeated_blocks = ["Magi2TransformerLayer"]
         # SP doubles as MAGI's MoE-head parallel axis. These modules therefore
         # contain different checkpoint slices on each SP rank and must remain
         # rank-local while HSDP shards the replicated parameters around them.
