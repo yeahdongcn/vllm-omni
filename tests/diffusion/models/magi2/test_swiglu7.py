@@ -5,7 +5,33 @@ import os
 import pytest
 import torch
 
-from vllm_omni.diffusion.models.magi2.layers import swiglu7
+from vllm_omni.diffusion.models.magi2.layers import MHCHandler, swiglu7
+
+
+def test_mhc_coefficient_fusion_preserves_cpu_reference_and_strides(monkeypatch):
+    torch.manual_seed(29)
+    handler = MHCHandler(4, 2560)
+    packed = torch.randn(5, 24, dtype=torch.float32)
+    post_logits = packed[:, 4:8]
+    residual_logits = packed[:, 8:].reshape(5, 4, 4)
+    post = (
+        torch.tensor([1.3]),
+        torch.randn(4),
+        post_logits,
+    )
+    residual = (
+        torch.tensor([0.8]),
+        torch.randn(4, 4),
+        residual_logits,
+    )
+    assert post_logits.stride(0) == 24
+    assert residual_logits.stride(0) == 24
+    monkeypatch.setenv("MAGI2_FUSED_MHC_COEFFICIENTS", "0")
+    expected = handler.compute_post_residual(post, residual, out_dtype=torch.bfloat16)
+    monkeypatch.setenv("MAGI2_FUSED_MHC_COEFFICIENTS", "1")
+    actual = handler.compute_post_residual(post, residual, out_dtype=torch.bfloat16)
+    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
 
 
 def test_fused_swiglu7_keeps_cpu_fallback(monkeypatch):
