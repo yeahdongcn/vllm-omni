@@ -865,7 +865,6 @@ def test_flash_attention_declares_musa_packed_mask_free(monkeypatch):
     from vllm_omni.platforms import current_omni_platform
 
     monkeypatch.setattr(current_omni_platform, "is_cuda", lambda: False)
-    monkeypatch.setattr(current_omni_platform, "is_rocm", lambda: False)
     monkeypatch.setattr(current_omni_platform, "is_npu", lambda: False)
     monkeypatch.setattr(current_omni_platform, "is_musa", lambda: True)
 

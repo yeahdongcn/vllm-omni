@@ -26,17 +26,12 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_packed_mask_free(cls) -> bool:
-        # CUDA/ROCm/MUSA: forward_cuda dispatches the packed cu_seqlens
-        # varlen path before ever reading attn_mask. NPU: forward_fa_npu honors the
+        # CUDA/MUSA: forward_cuda dispatches the packed cu_seqlens varlen
+        # path before ever reading attn_mask. NPU: forward_fa_npu honors the
         # npu_attn_varlen opt-in and rebuilds the padding mask itself if the
         # packed contract fails. XPU reads attn_mask, so models must keep
         # constructing it there.
-        return (
-            current_omni_platform.is_cuda()
-            or current_omni_platform.is_rocm()
-            or current_omni_platform.is_musa()
-            or current_omni_platform.is_npu()
-        )
+        return current_omni_platform.is_cuda() or current_omni_platform.is_musa() or current_omni_platform.is_npu()
 
     @classmethod
     def supports_multi_doc_packed_varlen(cls) -> bool:
