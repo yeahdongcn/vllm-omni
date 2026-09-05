@@ -860,6 +860,18 @@ def test_packed_attention_skips_mask_for_packed_mask_free_backend():
     assert packed_padding.cu_seqlens_k.tolist() == [0, 5]
 
 
+def test_flash_attention_declares_musa_packed_mask_free(monkeypatch):
+    from vllm_omni.diffusion.attention.backends.flash_attn import FlashAttentionBackend
+    from vllm_omni.platforms import current_omni_platform
+
+    monkeypatch.setattr(current_omni_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(current_omni_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_omni_platform, "is_npu", lambda: False)
+    monkeypatch.setattr(current_omni_platform, "is_musa", lambda: True)
+
+    assert FlashAttentionBackend.supports_packed_mask_free() is True
+
+
 def test_packed_attention_keeps_padding_mask_for_other_backends():
     from vllm_omni.diffusion.models.minimax_h3.minimax_h3_transformer import (
         MiniMaxH3Attention,
