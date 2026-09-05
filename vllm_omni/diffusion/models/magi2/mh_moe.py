@@ -103,8 +103,14 @@ def _magi2_align_block_size(
     the fused path remains usable while an AOT MUSA align op is upstreamed.
     """
     ids = topk_ids.reshape(-1).to(torch.int32)
-    force_fixed_capacity = os.environ.get("MAGI2_MOE_ALIGN_FIXED_CAPACITY") == "1"
-    force_dynamic_fallback = os.environ.get("MAGI2_MOE_ALIGN_FIXED_CAPACITY") == "0"
+    align_mode = os.environ.get("MAGI2_MOE_ALIGN_FIXED_CAPACITY")
+    force_fixed_capacity = align_mode == "1"
+    force_dynamic_fallback = align_mode == "0"
+    # Keep the existing CUDA/CPU behavior untouched.  The fixed-capacity
+    # implementation is a MUSA fallback for the image where the Python
+    # wrapper is present but the CUDA ``_moe_C`` extension is absent; callers
+    # can still force it on another backend for diagnostics.
+    musa_device = ids.device.type in {"musa", "privateuseone"}
     if force_fixed_capacity:
         return _magi2_align_block_size_fixed_capacity(
             ids, num_experts, block_size
@@ -140,7 +146,7 @@ def _magi2_align_block_size(
             # failed custom-op dispatch on every layer.
             _MAGI2_ALIGN_OP_AVAILABLE = False
 
-    if not force_dynamic_fallback:
+    if musa_device and not force_dynamic_fallback:
         # The MUSA image normally has the Python wrapper but not its CUDA
         # ``_moe_C`` implementation. Prefer the device-count/capacity path by
         # default; setting ``MAGI2_MOE_ALIGN_FIXED_CAPACITY=0`` retains the
