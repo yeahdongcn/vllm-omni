@@ -67,6 +67,8 @@ _A2A_STAGING_BUFFER_LIMIT = 32
 def _a2a_staging_buffer(
     role: str, shape: tuple[int, ...], dtype: torch.dtype, device: torch.device
 ) -> torch.Tensor:
+    if os.environ.get("MAGI2_DISABLE_A2A_STAGING") == "1":
+        return torch.empty(shape, dtype=dtype, device=device)
     if torch.is_grad_enabled() or torch.compiler.is_compiling():
         return torch.empty(shape, dtype=dtype, device=device)
     if device.type not in {"cuda", "musa", "privateuseone"}:
