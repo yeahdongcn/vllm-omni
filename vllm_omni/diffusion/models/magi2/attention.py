@@ -155,6 +155,20 @@ def apply_rotary_emb(
     rotary_dim = cos.shape[-1] * 2
     if rotary_dim > x.shape[-1]:
         raise ValueError(f"RoPE dimension {rotary_dim} exceeds head dimension {x.shape[-1]}")
+    # MAGI-2 uses the released non-interleaved layout.  Avoid materializing
+    # duplicated cosine/sine tables and the temporary rotate_half tensor on
+    # MUSA; the arithmetic order remains the same pairwise rotation.
+    if (
+        not interleaved
+        and os.environ.get("MAGI2_FAST_ROPE", "0") == "1"
+        and x.device.type in {"musa", "privateuseone"}
+    ):
+        cos = cos.to(dtype=x.dtype).unsqueeze(-2)
+        sin = sin.to(dtype=x.dtype).unsqueeze(-2)
+        x_rot = x[..., :rotary_dim]
+        x1, x2 = x_rot.chunk(2, dim=-1)
+        rotated = torch.cat((x1 * cos - x2 * sin, x2 * cos + x1 * sin), dim=-1)
+        return torch.cat((rotated, x[..., rotary_dim:]), dim=-1)
     if interleaved:
         cos = cos.unsqueeze(-2).repeat_interleave(2, dim=-1)
         sin = sin.unsqueeze(-2).repeat_interleave(2, dim=-1)
