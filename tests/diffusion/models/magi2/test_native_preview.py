@@ -11,6 +11,7 @@ import torch
 
 from vllm_omni.diffusion.cache.cachedit.model_specific import enable_cache_for_magi2
 from vllm_omni.diffusion.data import DiffusionCacheConfig
+from vllm_omni.diffusion.models.magi2 import mh_moe
 from vllm_omni.diffusion.models.magi2.attention import VarlenHandler
 from vllm_omni.diffusion.models.magi2.configuration_magi2 import (
     Magi2MHCConfig,
@@ -18,7 +19,6 @@ from vllm_omni.diffusion.models.magi2.configuration_magi2 import (
     Magi2PreviewConfig,
 )
 from vllm_omni.diffusion.models.magi2.layers import MultiModalityRMSNorm
-from vllm_omni.diffusion.models.magi2 import mh_moe
 from vllm_omni.diffusion.models.magi2.mh_moe import Magi2MultiHeadMoE
 from vllm_omni.diffusion.models.magi2.modeling_magi2 import (
     Magi2PreviewTransformer,
@@ -272,6 +272,49 @@ def test_global_sort_routes_with_head_ids_and_counts_reuses_csr_histogram() -> N
         minlength=heads * experts,
     ).to(torch.int32)
     torch.testing.assert_close(actual[4], expected_counts, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "topk_ids, num_experts, block_size",
+    [
+        (torch.tensor([], dtype=torch.int32), 8, 4),
+        (torch.tensor([0, 0, 0, 1, 3, 3, 7], dtype=torch.int32), 8, 4),
+        (torch.tensor([2, 0, 1, 2, 1, 0, 2], dtype=torch.int32), 4, 4),
+    ],
+)
+def test_fixed_capacity_moe_align_preserves_published_prefix(
+    topk_ids: torch.Tensor, num_experts: int, block_size: int
+) -> None:
+    """The no-sync MUSA metadata path matches the dynamic reference prefix."""
+
+    sorted_ids, expert_ids, num_padded = (
+        mh_moe._magi2_align_block_size_fixed_capacity(
+            topk_ids, num_experts, block_size
+        )
+    )
+    order = torch.argsort(topk_ids)
+    sorted_experts = topk_ids[order]
+    counts = torch.bincount(topk_ids, minlength=num_experts)
+    padded_counts = ((counts + block_size - 1) // block_size) * block_size
+    expected_total = int(padded_counts.sum().item())
+    expected_sorted = torch.full(
+        (expected_total,), topk_ids.numel(), dtype=torch.int32
+    )
+    starts = torch.cumsum(padded_counts, 0) - padded_counts
+    ends = torch.cumsum(counts, 0)
+    begins = ends - counts
+    positions = torch.arange(topk_ids.numel(), dtype=torch.int64)
+    experts = sorted_experts.to(torch.int64)
+    destinations = starts[experts] + positions - begins[experts]
+    expected_sorted[destinations] = order.to(torch.int32)
+    expected_experts = torch.repeat_interleave(
+        torch.arange(num_experts, dtype=torch.int32), padded_counts // block_size
+    )
+
+    torch.testing.assert_close(sorted_ids[:expected_total], expected_sorted)
+    torch.testing.assert_close(expert_ids[: expected_experts.numel()], expected_experts)
+    assert int(num_padded.item()) == expected_total
+    assert torch.all(expert_ids[expected_experts.numel() :] == -1)
 
 
 def test_moe_forward_uses_request_split_sizes_without_all_gather(

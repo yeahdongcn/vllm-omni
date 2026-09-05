@@ -23,7 +23,6 @@ from typing import Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from vllm.triton_utils import tl, triton
 
 from vllm_omni.platforms import current_omni_platform
@@ -36,6 +35,60 @@ logger = logging.getLogger(__name__)
 _MATE_MOE_WARNED = False
 _SGL_FUSED_MOE_MODULE = None
 _SGL_FUSED_MOE_WORKSPACES: dict[tuple, torch.Tensor] = {}
+_MAGI2_ALIGN_OP_AVAILABLE: bool | None = None
+
+
+def _magi2_align_block_size_fixed_capacity(
+    ids: torch.Tensor,
+    num_experts: int,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build aligned route metadata without device-to-host scalar reads.
+
+    The generic ``_moe_C`` align op is not present in the vLLM-MUSA image.
+    Its eager fallback used a dynamic ``repeat_interleave`` result and called
+    ``.item()`` twice per MoE layer to discover the published length.  Keep
+    the buffers at their deterministic worst-case capacity instead: the
+    fused Triton kernel already consumes ``num_tokens_post_pad`` on device
+    and returns early for the unused tail.  ``searchsorted`` maps block
+    indices to experts without a dynamic output allocation.
+    """
+
+    route_count = ids.numel()
+    capacity = max(route_count + num_experts * (block_size - 1), block_size)
+    max_blocks = (capacity + block_size - 1) // block_size
+    sorted_ids = torch.full(
+        (capacity,), route_count, device=ids.device, dtype=torch.int32
+    )
+
+    # ``torch.sort`` returns values and indices in one operation and preserves
+    # the route order used by the previous argsort + gather implementation.
+    sorted_experts, order = torch.sort(ids)
+    counts = torch.zeros(num_experts, device=ids.device, dtype=torch.int32)
+    if route_count:
+        counts.scatter_add_(
+            0, ids, torch.ones_like(ids, dtype=torch.int32)
+        )
+    padded_counts = ((counts + block_size - 1) // block_size) * block_size
+    starts = torch.cumsum(padded_counts, 0) - padded_counts
+    ends = torch.cumsum(counts, 0)
+    begins = ends - counts
+    positions = torch.arange(route_count, device=ids.device, dtype=torch.int64)
+    experts = sorted_experts.to(torch.int64)
+    destinations = starts[experts] + positions - begins[experts]
+    sorted_ids[destinations] = order.to(torch.int32)
+
+    block_counts = padded_counts // block_size
+    cumulative_blocks = torch.cumsum(block_counts, 0)
+    block_indices = torch.arange(max_blocks, device=ids.device, dtype=torch.int32)
+    mapped_experts = torch.searchsorted(
+        cumulative_blocks, block_indices, right=True
+    ).to(torch.int32)
+    expert_ids = torch.where(
+        block_indices < cumulative_blocks[-1], mapped_experts, -1
+    ).to(torch.int32)
+    num_padded = padded_counts.sum(dtype=torch.int32).reshape(1)
+    return sorted_ids, expert_ids, num_padded
 
 
 def _magi2_align_block_size(
@@ -50,52 +103,78 @@ def _magi2_align_block_size(
     the fused path remains usable while an AOT MUSA align op is upstreamed.
     """
     ids = topk_ids.reshape(-1).to(torch.int32)
-    try:
-        from vllm._custom_ops import moe_align_block_size
+    force_fixed_capacity = os.environ.get("MAGI2_MOE_ALIGN_FIXED_CAPACITY") == "1"
+    force_dynamic_fallback = os.environ.get("MAGI2_MOE_ALIGN_FIXED_CAPACITY") == "0"
+    if force_fixed_capacity:
+        return _magi2_align_block_size_fixed_capacity(
+            ids, num_experts, block_size
+        )
 
-        capacity = ids.numel() + num_experts * block_size
-        sorted_ids = torch.empty((capacity,), device=ids.device, dtype=torch.int32)
-        expert_ids = torch.empty(
-            (capacity // block_size,), device=ids.device, dtype=torch.int32
+    global _MAGI2_ALIGN_OP_AVAILABLE
+    if not force_dynamic_fallback and _MAGI2_ALIGN_OP_AVAILABLE is not False:
+        try:
+            from vllm._custom_ops import moe_align_block_size
+
+            capacity = ids.numel() + num_experts * block_size
+            sorted_ids = torch.empty(
+                (capacity,), device=ids.device, dtype=torch.int32
+            )
+            expert_ids = torch.empty(
+                (capacity // block_size,), device=ids.device, dtype=torch.int32
+            )
+            num_padded = torch.empty((1,), device=ids.device, dtype=torch.int32)
+            moe_align_block_size(
+                ids,
+                num_experts,
+                block_size,
+                sorted_ids,
+                expert_ids,
+                num_padded,
+            )
+            _MAGI2_ALIGN_OP_AVAILABLE = True
+            n = int(num_padded.item())
+            return sorted_ids[:n], expert_ids[: n // block_size], num_padded
+        except Exception:
+            # Some MUSA images expose the Python wrapper but not its CUDA
+            # ``_moe_C`` symbol.  Cache that fact to avoid an exception and
+            # failed custom-op dispatch on every layer.
+            _MAGI2_ALIGN_OP_AVAILABLE = False
+
+    if not force_dynamic_fallback:
+        # The MUSA image normally has the Python wrapper but not its CUDA
+        # ``_moe_C`` implementation. Prefer the device-count/capacity path by
+        # default; setting ``MAGI2_MOE_ALIGN_FIXED_CAPACITY=0`` retains the
+        # original dynamic fallback as an emergency rollback.
+        return _magi2_align_block_size_fixed_capacity(
+            ids, num_experts, block_size
         )
-        num_padded = torch.empty((1,), device=ids.device, dtype=torch.int32)
-        moe_align_block_size(
-            ids,
-            num_experts,
-            block_size,
-            sorted_ids,
-            expert_ids,
-            num_padded,
-        )
-        n = int(num_padded.item())
-        return sorted_ids[:n], expert_ids[: n // block_size], num_padded
-    except Exception:
-        # MUSA builds may expose the Python wrapper without the CUDA `_moe_C`
-        # extension.  This implementation intentionally stays on-device.
-        order = torch.argsort(ids)
-        sorted_experts = ids[order]
-        counts = torch.bincount(ids, minlength=num_experts)
-        padded_counts = ((counts + block_size - 1) // block_size) * block_size
-        total = int(padded_counts.sum().item())
-        sorted_ids = torch.full(
-            (total,), ids.numel(), device=ids.device, dtype=torch.int32
-        )
-        starts = torch.cumsum(padded_counts, 0) - padded_counts
-        ends = torch.cumsum(counts, 0)
-        begins = ends - counts
-        positions = torch.arange(ids.numel(), device=ids.device, dtype=torch.int64)
-        experts = sorted_experts.to(torch.int64)
-        destinations = starts[experts] + positions - begins[experts]
-        sorted_ids[destinations] = order.to(torch.int32)
-        expert_ids = torch.repeat_interleave(
-            torch.arange(num_experts, device=ids.device, dtype=torch.int32),
-            padded_counts // block_size,
-        )
-        return (
-            sorted_ids,
-            expert_ids,
-            torch.tensor(total, device=ids.device, dtype=torch.int32),
-        )
+
+    # MUSA builds may expose the Python wrapper without the CUDA `_moe_C`
+    # extension.  This implementation intentionally stays on-device.
+    order = torch.argsort(ids)
+    sorted_experts = ids[order]
+    counts = torch.bincount(ids, minlength=num_experts)
+    padded_counts = ((counts + block_size - 1) // block_size) * block_size
+    total = int(padded_counts.sum().item())
+    sorted_ids = torch.full(
+        (total,), ids.numel(), device=ids.device, dtype=torch.int32
+    )
+    starts = torch.cumsum(padded_counts, 0) - padded_counts
+    ends = torch.cumsum(counts, 0)
+    begins = ends - counts
+    positions = torch.arange(ids.numel(), device=ids.device, dtype=torch.int64)
+    experts = sorted_experts.to(torch.int64)
+    destinations = starts[experts] + positions - begins[experts]
+    sorted_ids[destinations] = order.to(torch.int32)
+    expert_ids = torch.repeat_interleave(
+        torch.arange(num_experts, device=ids.device, dtype=torch.int32),
+        padded_counts // block_size,
+    )
+    return (
+        sorted_ids,
+        expert_ids,
+        torch.tensor(total, device=ids.device, dtype=torch.int32),
+    )
 
 
 def _magi2_sgl_fused_moe_module():
@@ -178,8 +257,13 @@ def _magi2_sgl_fused_moe_forward(
     # does not guarantee writes for sentinel rows on every Triton revision;
     # zero-initialize them so padded routes cannot leak uninitialized values
     # into the down-projection (notably the audio branch).
+    # The helper returns a capacity-sized buffer for the normal MUSA path and
+    # a published-length slice for the optional dynamic rollback. In both
+    # cases the shape is the correct allocation size; the kernel reads the
+    # actual row count from ``num_padded`` on device.
+    intermediate_rows = sorted_ids.shape[0]
     intermediate = torch.zeros(
-        (int(num_padded.item()), intermediate_size),
+        (intermediate_rows, intermediate_size),
         device=x_heads.device,
         dtype=x_heads.dtype,
     )
