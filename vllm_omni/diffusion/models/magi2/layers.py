@@ -542,6 +542,48 @@ class MHCHandler:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         alpha_post, bias_post, post_logits = post
         alpha_residual, bias_residual, residual_logits = residual
+        use_fused_coefficients = (
+            os.environ.get("MAGI2_FUSED_MHC_COEFFICIENTS", "0") == "1"
+            and os.environ.get("MAGI2_DETERMINISTIC", "0") != "1"
+            and residual_logits.device.type in {"musa", "privateuseone"}
+            and residual_logits.dtype == torch.float32
+            and post_logits.dtype == torch.float32
+            and out_dtype == torch.bfloat16
+            and alpha_post.dtype == torch.float32
+            and bias_post.dtype == torch.float32
+            and alpha_residual.dtype == torch.float32
+            and bias_residual.dtype == torch.float32
+            and self.num_streams == 4
+            and post_logits.ndim == 2
+            and post_logits.shape[-1] == 4
+            and residual_logits.ndim == 3
+            and residual_logits.shape[-2:] == (4, 4)
+            and post_logits.stride(-1) == 1
+            and residual_logits.stride()[-2:] == (4, 1)
+        )
+        if use_fused_coefficients:
+            try:
+                from .mhc_kernel import mhc_coefficients
+
+                packed = mhc_coefficients(
+                    post_logits,
+                    residual_logits,
+                    alpha_post,
+                    bias_post,
+                    alpha_residual,
+                    bias_residual,
+                    scale=self.matmul_scale,
+                    num_iters=self.sinkhorn_iterations,
+                    eps=self.sinkhorn_epsilon,
+                )
+                post_coefficients = packed[:, :4].contiguous()
+                residual_matrix = packed[:, 4:].reshape(-1, 4, 4).contiguous()
+                return post_coefficients, residual_matrix
+            except Exception as exc:
+                logger.warning(
+                    "MAGI-2 fused mHC coefficient kernel failed; using reference path: %s",
+                    exc,
+                )
         post_coefficients = 2.0 * torch.sigmoid(alpha_post * self.matmul_scale * post_logits + bias_post.unsqueeze(0))
         residual_matrix = sinkhorn_knopp(
             alpha_residual * self.matmul_scale * residual_logits.float() + bias_residual.unsqueeze(0).float(),

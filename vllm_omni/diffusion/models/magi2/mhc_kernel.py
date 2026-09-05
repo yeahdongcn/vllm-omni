@@ -11,6 +11,117 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
+def _mhc_coefficients_kernel(
+    post_logits_ptr,
+    residual_logits_ptr,
+    alpha_post_ptr,
+    bias_post_ptr,
+    alpha_residual_ptr,
+    bias_residual_ptr,
+    out_ptr,
+    post_stride,
+    residual_stride,
+    scale,
+    eps,
+    hidden: tl.constexpr,
+    NUM_ITERS: tl.constexpr,
+):
+    """Fuse MAGI-2 coefficient affine transforms and Sinkhorn normalization.
+
+    The input views are the post-split portions of the [tokens, 24] projection,
+    hence their token stride is intentionally a runtime value (normally 24).
+    The output packs BF16 post coefficients followed by the BF16 residual
+    matrix; callers materialize contiguous views before the connection kernel.
+    """
+
+    token = tl.program_id(0)
+    post_offs = tl.arange(0, 4)
+    residual_offs = tl.arange(0, 16)
+    post_logits = tl.load(post_logits_ptr + token * post_stride + post_offs).to(tl.float32)
+    residual_logits = tl.load(
+        residual_logits_ptr + token * residual_stride + residual_offs
+    ).to(tl.float32)
+    alpha_post = tl.load(alpha_post_ptr).to(tl.float32)
+    alpha_residual = tl.load(alpha_residual_ptr).to(tl.float32)
+    post_bias = tl.load(bias_post_ptr + post_offs).to(tl.float32)
+    residual_bias = tl.load(bias_residual_ptr + residual_offs).to(tl.float32)
+
+    post = 2.0 * tl.sigmoid(alpha_post * scale * post_logits + post_bias)
+    rows = residual_offs // 4
+    cols = residual_offs - rows * 4
+    matrix = alpha_residual * scale * residual_logits + residual_bias
+    matrix = tl.exp(matrix - tl.max(matrix, axis=0))
+    for _ in tl.static_range(NUM_ITERS):
+        col0 = tl.sum(tl.where(cols == 0, matrix, 0.0), axis=0)
+        col1 = tl.sum(tl.where(cols == 1, matrix, 0.0), axis=0)
+        col2 = tl.sum(tl.where(cols == 2, matrix, 0.0), axis=0)
+        col3 = tl.sum(tl.where(cols == 3, matrix, 0.0), axis=0)
+        col_sum = tl.where(
+            cols == 0,
+            col0,
+            tl.where(cols == 1, col1, tl.where(cols == 2, col2, col3)),
+        )
+        matrix = matrix / (col_sum + eps)
+        row0 = tl.sum(tl.where(rows == 0, matrix, 0.0), axis=0)
+        row1 = tl.sum(tl.where(rows == 1, matrix, 0.0), axis=0)
+        row2 = tl.sum(tl.where(rows == 2, matrix, 0.0), axis=0)
+        row3 = tl.sum(tl.where(rows == 3, matrix, 0.0), axis=0)
+        row_sum = tl.where(
+            rows == 0,
+            row0,
+            tl.where(rows == 1, row1, tl.where(rows == 2, row2, row3)),
+        )
+        matrix = matrix / (row_sum + eps)
+
+    out_base = out_ptr + token * 20
+    tl.store(out_base + post_offs, post.to(tl.bfloat16))
+    tl.store(out_base + 4 + residual_offs, matrix.to(tl.bfloat16))
+
+
+def _mhc_coefficients(
+    post_logits: torch.Tensor,
+    residual_logits: torch.Tensor,
+    alpha_post: torch.Tensor,
+    bias_post: torch.Tensor,
+    alpha_residual: torch.Tensor,
+    bias_residual: torch.Tensor,
+    *,
+    scale: float,
+    num_iters: int,
+    eps: float,
+) -> torch.Tensor:
+    if post_logits.ndim != 2 or post_logits.shape[-1] != 4:
+        raise ValueError("expected post logits shape [tokens, 4]")
+    if residual_logits.ndim != 3 or residual_logits.shape[-2:] != (4, 4):
+        raise ValueError("expected residual logits shape [tokens, 4, 4]")
+    if post_logits.shape[0] != residual_logits.shape[0]:
+        raise ValueError("post and residual token counts must match")
+    if post_logits.stride(-1) != 1 or residual_logits.stride()[-2:] != (4, 1):
+        raise ValueError("mHC coefficient views must be contiguous in their stream dimensions")
+    if num_iters > 64:
+        raise ValueError("MAGI-2 fused Sinkhorn requires iters<=64")
+    tokens = post_logits.shape[0]
+    out = torch.empty((tokens, 20), dtype=torch.bfloat16, device=post_logits.device)
+    _mhc_coefficients_kernel[(tokens,)](
+        post_logits,
+        residual_logits,
+        alpha_post,
+        bias_post,
+        alpha_residual,
+        bias_residual,
+        out,
+        post_logits.stride(0),
+        residual_logits.stride(0),
+        scale,
+        eps,
+        hidden=4,
+        NUM_ITERS=num_iters,
+        num_warps=1,
+    )
+    return out
+
+
+@triton.jit
 def _mhc_mix_output_kernel(
     streams_ptr,
     block_out_ptr,
@@ -159,6 +270,24 @@ def _mhc_sinkhorn_fake(logits: torch.Tensor, *, num_iters: int, eps: float) -> t
     return torch.empty_like(logits, dtype=torch.float32)
 
 
+def _mhc_coefficients_fake(
+    post_logits: torch.Tensor,
+    residual_logits: torch.Tensor,
+    alpha_post: torch.Tensor,
+    bias_post: torch.Tensor,
+    alpha_residual: torch.Tensor,
+    bias_residual: torch.Tensor,
+    *,
+    scale: float,
+    num_iters: int,
+    eps: float,
+) -> torch.Tensor:
+    del alpha_post, bias_post, alpha_residual, bias_residual, scale, num_iters, eps
+    return torch.empty(
+        (post_logits.shape[0], 20), dtype=torch.bfloat16, device=post_logits.device
+    )
+
+
 # Register at import time so compiled diffusion regions see an opaque custom op
 # instead of a first-call Triton graph break/JIT.
 direct_register_custom_op(
@@ -177,5 +306,13 @@ direct_register_custom_op(
 )
 mhc_sinkhorn = torch.ops.vllm.magi2_mhc_sinkhorn
 
+direct_register_custom_op(
+    "magi2_mhc_coefficients",
+    _mhc_coefficients,
+    mutates_args=[],
+    fake_impl=_mhc_coefficients_fake,
+)
+mhc_coefficients = torch.ops.vllm.magi2_mhc_coefficients
 
-__all__ = ["mhc_mix_output", "mhc_sinkhorn"]
+
+__all__ = ["mhc_coefficients", "mhc_mix_output", "mhc_sinkhorn"]
