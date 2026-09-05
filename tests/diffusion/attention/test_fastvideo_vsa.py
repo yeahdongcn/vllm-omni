@@ -19,6 +19,7 @@ from vllm_omni.diffusion.attention.backends.fastvideo_vsa import (
     FastVideoVSABackend,
     FastVideoVSAImpl,
     _build_h3_block_map,
+    _build_h3_compact_indices,
     _get_h3_tile_metadata,
 )
 from vllm_omni.diffusion.attention.backends.registry import (
@@ -30,6 +31,20 @@ pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, pytest.mark.cpu]
 
 def test_fastvideo_vsa_backend_is_registered():
     assert DiffusionAttentionBackendEnum.FASTVIDEO_VSA.get_path().endswith("fastvideo_vsa.FastVideoVSABackend")
+
+
+@pytest.mark.parametrize("prefix,video,topk", [(0, 7, 4), (3, 7, 4), (3, 65, 64), (7, 1, 8)])
+def test_h3_compact_indices_match_ascending_bool_map(prefix, video, topk):
+    scores = torch.randn(2, 2, prefix + video, prefix + video)
+    block_map = _build_h3_block_map(scores, prefix, video, topk)
+    indices, counts = _build_h3_compact_indices(scores, prefix, video, topk)
+    for b in range(scores.shape[0]):
+        for h in range(scores.shape[1]):
+            for q in range(prefix + video):
+                expected = torch.where(block_map[b, h, q])[0].to(torch.int32)
+                actual = indices[b, h, q, : counts[b, h, q]]
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                assert torch.all(indices[b, h, q, counts[b, h, q] :] == -1)
 
 
 def test_fastvideo_vsa_reports_missing_optional_kernel(monkeypatch):

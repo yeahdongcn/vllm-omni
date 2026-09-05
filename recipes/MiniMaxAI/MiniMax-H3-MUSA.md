@@ -120,6 +120,7 @@ These are T2VA requests through the FL2VA pipeline, not Ref2VA video inputs.
 | Dense TP8, static regional compile | 51.859 | 54.344 |
 | Dense TP8, same-round final control | 52.046 | 54.525 |
 | Experimental VSA TP8, top-k 64 | 47.928 | 50.286 |
+| Experimental VSA TP8, direct compact indices | 46.923 | 49.303 |
 | Dense TP1, HSDP8 + Ulysses8 | 50.839 | 53.362 |
 | Dense TP2 + Ulysses4 | 55.495 | 57.919 |
 | Dense TP4 + Ulysses2 | 57.854 | 60.205 |
@@ -232,6 +233,7 @@ After preparing that dependency, the changes from the dense command are:
 ```bash
 export FASTVIDEO_VSA_TRITON=1
 export FASTVIDEO_VSA_SM100A=0
+export FASTVIDEO_VSA_DIRECT_INDICES=1  # opt-in compact-index A/B
 # Set the following options on the eight-GPU serving command:
 # --diffusion-attention-backend FASTVIDEO_VSA
 # --fastvideo-vsa-topk 64
@@ -241,6 +243,12 @@ export FASTVIDEO_VSA_SM100A=0
 The focused backend suite passes 23 tests, covering CUDA/MUSA H3 dispatch,
 packed-padding restoration, fallback mask semantics and MUSA error handling.
 Those tests do not establish that every non-H3 model supports MUSA VSA.
+
+The direct-index option measured 46.923 s generation / 49.303 s server E2E
+over three requests on the same workload, versus 47.928 / 50.286 s for the
+bool-map path. Responses decode as H.264/AAC at 1344x768 for 15.084 seconds;
+the three direct responses have a stable hash. Keep this option experimental
+until broader sparse-model and reference-video validation is complete.
 
 An S5000 correctness validation on 2026-09-05 used vLLM 0.28.0,
 vLLM-MUSA 0.1.28, vLLM-Omni main at `0f9ee6af` plus the MUSA event fix,

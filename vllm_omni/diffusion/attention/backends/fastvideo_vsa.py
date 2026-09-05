@@ -159,6 +159,41 @@ if not hasattr(torch.ops.vllm_omni, "fastvideo_h3_vsa_bhsd"):
 _fastvideo_h3_vsa_bhsd_op = torch.ops.vllm_omni.fastvideo_h3_vsa_bhsd
 
 
+# Experimental direct-index ABI.  The production-compatible wrapper above
+# converts a dense bool map inside FastVideo; this opt-in path constructs the
+# same ascending KV indices here and calls the public compact-index API.
+if not hasattr(torch.ops.vllm_omni, "fastvideo_h3_vsa_indices_bhsd"):
+
+    @torch.library.custom_op("vllm_omni::fastvideo_h3_vsa_indices_bhsd", mutates_args=())
+    def _fastvideo_h3_vsa_indices_bhsd_op(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        q2k_idx: torch.Tensor,
+        q2k_num: torch.Tensor,
+        variable_block_sizes: torch.Tensor,
+    ) -> torch.Tensor:
+        from fastvideo_kernel.block_sparse_attn import block_sparse_attn_from_indices
+
+        out, _ = block_sparse_attn_from_indices(
+            query.transpose(1, 2).contiguous(),
+            key.transpose(1, 2).contiguous(),
+            value.transpose(1, 2).contiguous(),
+            q2k_idx,
+            q2k_num,
+            variable_block_sizes,
+        )
+        return out.transpose(1, 2).contiguous()
+
+    @_fastvideo_h3_vsa_indices_bhsd_op.register_fake
+    def _(query, key, value, q2k_idx, q2k_num, variable_block_sizes):
+        del key, value, q2k_idx, q2k_num, variable_block_sizes
+        return torch.empty_like(query)
+
+
+_fastvideo_h3_vsa_indices_bhsd_op = torch.ops.vllm_omni.fastvideo_h3_vsa_indices_bhsd
+
+
 @functools.lru_cache(maxsize=32)
 def _get_tile_partition_indices(
     dit_seq_shape: tuple[int, int, int],
@@ -299,6 +334,46 @@ def _build_h3_block_map(
     block_map[..., :num_prefix_blocks] = True
     block_map[:, :, :num_prefix_blocks, :] = True
     return block_map
+
+
+def _build_h3_compact_indices(
+    scores: torch.Tensor,
+    num_prefix_blocks: int,
+    num_video_blocks: int,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build the index ABI without materializing a dense bool block map.
+
+    Prefix query blocks remain dense. Only video-query rows perform top-k;
+    FastVideo's compatibility map unnecessarily computes top-k for prefix rows
+    before overwriting them. Sorting the selected IDs restores map_to_index's
+    ascending KV traversal order.
+    """
+    batch, heads, _, _ = scores.shape
+    total = num_prefix_blocks + num_video_blocks
+    keep_video = min(topk, num_video_blocks)
+    q2k_idx = torch.full(
+        (batch, heads, total, total), -1, device=scores.device, dtype=torch.int32
+    )
+    q2k_num = torch.full(
+        (batch, heads, total), total, device=scores.device, dtype=torch.int32
+    )
+    dense = torch.arange(total, device=scores.device, dtype=torch.int32)
+    q2k_idx[:, :, :num_prefix_blocks, :] = dense
+    if keep_video == num_video_blocks:
+        q2k_idx[:, :, num_prefix_blocks:, :] = dense
+    else:
+        prefix = dense[:num_prefix_blocks].view(1, 1, 1, -1).expand(
+            batch, heads, num_video_blocks, -1
+        )
+        selected = scores[:, :, num_prefix_blocks:, num_prefix_blocks:].topk(
+            keep_video, dim=-1
+        ).indices.to(torch.int32) + num_prefix_blocks
+        selected = selected.sort(dim=-1).values
+        q2k_idx[:, :, num_prefix_blocks:, : num_prefix_blocks] = prefix
+        q2k_idx[:, :, num_prefix_blocks:, num_prefix_blocks : num_prefix_blocks + keep_video] = selected
+        q2k_num[:, :, num_prefix_blocks:] = num_prefix_blocks + keep_video
+    return q2k_idx, q2k_num
 
 
 def _get_vsa_dit_seq_shape(attn_metadata: AttentionMetadata | None) -> tuple[int, int, int] | None:
@@ -551,10 +626,20 @@ class FastVideoVSAImpl(AttentionImpl):
         q_pool = _pool_h3_tiles(q_tiled[:, : logical_blocks * 64], sizes)
         k_pool = _pool_h3_tiles(k_tiled[:, : logical_blocks * 64], sizes)
         scores = torch.matmul(q_pool, k_pool.transpose(-2, -1)) * self.softmax_scale
-        block_map = _build_h3_block_map(scores, prefix_blocks, video_blocks, self.topk)
+        direct_indices = os.environ.get("FASTVIDEO_VSA_DIRECT_INDICES") == "1"
+        if direct_indices:
+            q2k_idx, q2k_num = _build_h3_compact_indices(
+                scores, prefix_blocks, video_blocks, self.topk
+            )
+        else:
+            block_map = _build_h3_block_map(scores, prefix_blocks, video_blocks, self.topk)
         kernel_sizes = sizes
         if pair_pad:
-            block_map = torch.nn.functional.pad(block_map, (0, 1, 0, 1), value=False)
+            if direct_indices:
+                q2k_idx = torch.nn.functional.pad(q2k_idx, (0, 1, 0, 1), value=-1)
+                q2k_num = torch.nn.functional.pad(q2k_num, (0, 1), value=0)
+            else:
+                block_map = torch.nn.functional.pad(block_map, (0, 1, 0, 1), value=False)
             kernel_sizes = torch.nn.functional.pad(sizes, (0, 1), value=0)
 
         logger.info_once(
@@ -568,14 +653,16 @@ class FastVideoVSAImpl(AttentionImpl):
             min(self.topk, video_blocks),
             kernel_blocks,
         )
-        output = _fastvideo_h3_vsa_bhsd_op(
-            q_tiled.contiguous(),
-            k_tiled.contiguous(),
-            v_tiled.contiguous(),
-            block_map.contiguous(),
-            kernel_sizes.contiguous(),
-            logical_blocks,
-        )[:, : logical_blocks * 64]
+        if direct_indices:
+            output = _fastvideo_h3_vsa_indices_bhsd_op(
+                q_tiled.contiguous(), k_tiled.contiguous(), v_tiled.contiguous(),
+                q2k_idx.contiguous(), q2k_num.contiguous(), kernel_sizes.contiguous()
+            )[:, : logical_blocks * 64]
+        else:
+            output = _fastvideo_h3_vsa_bhsd_op(
+                q_tiled.contiguous(), k_tiled.contiguous(), v_tiled.contiguous(),
+                block_map.contiguous(), kernel_sizes.contiguous(), logical_blocks,
+            )[:, : logical_blocks * 64]
 
         if gate is not None:
             gate_tiled = torch.zeros_like(q_tiled[:, : logical_blocks * 64])
