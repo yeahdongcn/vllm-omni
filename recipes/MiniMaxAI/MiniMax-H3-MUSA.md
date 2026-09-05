@@ -118,6 +118,7 @@ These are T2VA requests through the FL2VA pipeline, not Ref2VA video inputs.
 | Configuration | Generation median (s) | Server E2E median (s) |
 | --- | ---: | ---: |
 | Dense TP8, static regional compile | 51.859 | 54.344 |
+| Dense TP8, same-round final control | 52.046 | 54.525 |
 | Experimental VSA TP8, top-k 64 | 47.928 | 50.286 |
 | Dense TP1, HSDP8 + Ulysses8 | 50.839 | 53.362 |
 | Dense TP2 + Ulysses4 | 55.495 | 57.919 |
@@ -131,11 +132,24 @@ the measurement noise gate. The bounded graph experiment captured on all
 eight ranks and preserved byte-identical dense outputs across 15s/4s/15s
 requests, but did not improve E2E and is not enabled by this recipe.
 
-VSA reduces this workload's E2E by about 7.5%, but uses the separate
+The final dense control preserves the original video's exact bytes. Ring2
+(TP4/Ulysses1/Ring2) and Ring4 (TP2/Ulysses1/Ring4) were actually attempted:
+both reject the H3 attention-mask contract. Plain TP1/Ulysses8 without HSDP
+runs out of memory during model loading on these 80-GiB devices; it is not
+equivalent to the measured HSDP8 configuration.
+
+VSA reduces this workload's E2E by about 7.8% against the final control, but uses the separate
 `vsa-datafree` adapter. It is not a numerically equivalent replacement for the
 dense adapter. Repeated outputs decode and sampled frames are coherent;
 full human perceptual review remains required. Do not extrapolate these
 measurements to reference-video inputs, other resolutions or concurrency.
+
+Fresh rank0 traces show 24.724s cumulative device time for the dense varlen
+attention signature (208 calls), versus 16.514s for VSA's sparse kernel
+(200 calls, four steps times 50 H3 blocks). VSA additionally spends 0.732s
+in 200 bool-map-to-compact-index conversions. These instrumented device sums
+identify follow-up targets; they are not additive wall-time savings. Full
+TE/DiT/VAE stage boundaries were not annotated in this trace.
 
 ### Disaggregated T2VA/FL2VA (TE2 + DiT4)
 
