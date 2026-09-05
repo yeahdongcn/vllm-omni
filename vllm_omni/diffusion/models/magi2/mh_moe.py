@@ -192,6 +192,28 @@ def _magi2_sgl_fused_moe_module():
     return _SGL_FUSED_MOE_MODULE
 
 
+def _magi2_sgl_moe_config() -> dict[str, int]:
+    config = {
+        "BLOCK_SIZE_M": int(os.environ.get("MAGI2_SGL_BLOCK_M", "128")),
+        "BLOCK_SIZE_N": int(os.environ.get("MAGI2_SGL_BLOCK_N", "128")),
+        "BLOCK_SIZE_K": int(os.environ.get("MAGI2_SGL_BLOCK_K", "32")),
+        "GROUP_SIZE_M": int(os.environ.get("MAGI2_SGL_GROUP_M", "16")),
+        "num_warps": int(os.environ.get("MAGI2_SGL_NUM_WARPS", "16")),
+        "num_stages": int(os.environ.get("MAGI2_SGL_NUM_STAGES", "1")),
+    }
+    for name in ("BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K"):
+        value = config[name]
+        if value < 16 or value & (value - 1):
+            raise ValueError(f"{name} must be a power of two >= 16, got {value}")
+    if config["GROUP_SIZE_M"] <= 0:
+        raise ValueError("GROUP_SIZE_M must be positive")
+    if config["num_warps"] not in (1, 2, 4, 8, 16, 32):
+        raise ValueError("num_warps must be a supported power of two")
+    if config["num_stages"] <= 0:
+        raise ValueError("num_stages must be positive")
+    return config
+
+
 def _magi2_sgl_fused_moe_forward(
     x_heads: torch.Tensor,
     probabilities: torch.Tensor,
@@ -207,6 +229,7 @@ def _magi2_sgl_fused_moe_forward(
     top_k = probabilities.shape[-1]
     if top_k != 6:
         raise ValueError(f"SGLang MAGI-2 path expects top_k=6, got {top_k}")
+    config = _magi2_sgl_moe_config()
     num_experts_per_head = w_gate.shape[0] // num_heads
     intermediate_size = w_gate.shape[-1]
     num_experts = w_gate.shape[0]
@@ -226,7 +249,7 @@ def _magi2_sgl_fused_moe_forward(
         .mul(num_experts_per_head)
     ).reshape(num_heads * num_tokens, top_k)
     sorted_ids, expert_ids, num_padded = _magi2_align_block_size(
-        route_ids, num_experts, 128
+        route_ids, num_experts, config["BLOCK_SIZE_M"]
     )
 
     # W13 is packed only into one per-process scratch buffer.  Keeping this
@@ -251,14 +274,6 @@ def _magi2_sgl_fused_moe_forward(
     kernels = _magi2_sgl_fused_moe_module()
     import triton.language as tl
 
-    config = {
-        "BLOCK_SIZE_M": int(os.environ.get("MAGI2_SGL_BLOCK_M", "128")),
-        "BLOCK_SIZE_N": int(os.environ.get("MAGI2_SGL_BLOCK_N", "128")),
-        "BLOCK_SIZE_K": int(os.environ.get("MAGI2_SGL_BLOCK_K", "32")),
-        "GROUP_SIZE_M": int(os.environ.get("MAGI2_SGL_GROUP_M", "16")),
-        "num_warps": int(os.environ.get("MAGI2_SGL_NUM_WARPS", "16")),
-        "num_stages": int(os.environ.get("MAGI2_SGL_NUM_STAGES", "1")),
-    }
     # The aligner pads each expert to a full tile.  The generic MUSA kernel
     # does not guarantee writes for sentinel rows on every Triton revision;
     # zero-initialize them so padded routes cannot leak uninitialized values
