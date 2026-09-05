@@ -27,8 +27,15 @@ def _swiglu7_kernel(
     linear = tl.load(x_ptr + offsets * 2 + 1, mask=mask, other=0.0).to(
         tl.float32
     )
-    gate = tl.minimum(gate, 7.0)
-    linear = tl.maximum(tl.minimum(linear, 7.0), -7.0)
+    # Preserve NaNs exactly like the reference ``torch.minimum``/clamp path;
+    # plain Triton minimum/max lowering is allowed to select the finite bound
+    # for a NaN on some MUSA compiler revisions.
+    gate = tl.where(gate != gate, gate, tl.minimum(gate, 7.0))
+    linear = tl.where(
+        linear != linear,
+        linear,
+        tl.maximum(tl.minimum(linear, 7.0), -7.0),
+    )
     activated = gate * tl.sigmoid(1.702 * gate) * (linear + 1.0)
     tl.store(out_ptr + offsets, activated, mask=mask)
 
@@ -55,6 +62,8 @@ def _swiglu7(x: torch.Tensor) -> torch.Tensor:
 
 
 def _swiglu7_fake(x: torch.Tensor) -> torch.Tensor:
+    if x.shape[-1] % 2:
+        raise ValueError(f"expected an even last dimension, got {x.shape[-1]}")
     return torch.empty(
         (*x.shape[:-1], x.shape[-1] // 2), device=x.device, dtype=x.dtype
     )
