@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 import os
-from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -52,43 +51,6 @@ class Magi2ParallelGroup:
 
 
 _CUSTOM_EP_GROUPS: dict[tuple[int, int, str], Magi2ParallelGroup] = {}
-
-# A denoising step executes the same Ulysses/EP exchanges for every MAGI-2
-# block.  Reusing the receive buffers removes allocator churn and lets the
-# collective write directly into storage that is already warm on the device.
-# The cache is deliberately bypassed for autograd, compilation, and graph
-# capture; those modes own their allocation lifetimes.
-_A2A_STAGING_BUFFERS: OrderedDict[
-    tuple[str, tuple[int, ...], torch.dtype, int | None], torch.Tensor
-] = OrderedDict()
-_A2A_STAGING_BUFFER_LIMIT = 32
-
-
-def _a2a_staging_buffer(
-    role: str, shape: tuple[int, ...], dtype: torch.dtype, device: torch.device
-) -> torch.Tensor:
-    if os.environ.get("MAGI2_DISABLE_A2A_STAGING") == "1":
-        return torch.empty(shape, dtype=dtype, device=device)
-    if torch.is_grad_enabled() or torch.compiler.is_compiling():
-        return torch.empty(shape, dtype=dtype, device=device)
-    if device.type not in {"cuda", "musa", "privateuseone"}:
-        return torch.empty(shape, dtype=dtype, device=device)
-    try:
-        if torch.cuda.is_current_stream_capturing():
-            return torch.empty(shape, dtype=dtype, device=device)
-    except (RuntimeError, AttributeError):
-        # MUSA builds may not expose CUDA's capture query through torchada.
-        pass
-    key = (role, tuple(shape), dtype, device.index)
-    buffer = _A2A_STAGING_BUFFERS.get(key)
-    if buffer is None:
-        buffer = torch.empty(shape, dtype=dtype, device=device)
-        _A2A_STAGING_BUFFERS[key] = buffer
-        if len(_A2A_STAGING_BUFFERS) > _A2A_STAGING_BUFFER_LIMIT:
-            _A2A_STAGING_BUFFERS.popitem(last=False)
-    else:
-        _A2A_STAGING_BUFFERS.move_to_end(key)
-    return buffer
 
 
 def _dist_group_info(group: dist.ProcessGroup | None) -> Magi2ParallelGroup:
@@ -284,7 +246,7 @@ def gather_sequence(
     if tensor.shape[0] != split_sizes[group.rank]:
         raise ValueError(f"rank {group.rank} owns {tensor.shape[0]} tokens, expected {split_sizes[group.rank]}")
     output_shape = (sum(split_sizes), *tensor.shape[1:])
-    output = _a2a_staging_buffer("usp_sequence_gather", output_shape, tensor.dtype, tensor.device)
+    output = torch.empty(output_shape, dtype=tensor.dtype, device=tensor.device)
     chunks = list(torch.split(output, split_sizes, dim=0))
     dist.all_gather(chunks, tensor.contiguous(), group=group.group)
     return output
@@ -306,8 +268,11 @@ def scatter_seqlen_gather_heads(
         raise ValueError("split_sizes must partition the input sequence")
 
     local_tokens = split_sizes[group.rank]
-    output_shape = (group.world_size * local_tokens, tensor.shape[1], tensor.shape[2])
-    output = _a2a_staging_buffer("usp_attention_input", output_shape, tensor.dtype, tensor.device)
+    output = torch.empty(
+        (group.world_size * local_tokens, tensor.shape[1], tensor.shape[2]),
+        dtype=tensor.dtype,
+        device=tensor.device,
+    )
     dist.all_to_all_single(
         output,
         tensor,
@@ -362,8 +327,11 @@ def scatter_heads_gather_seqlen(
         )
 
     fused = torch.cat(reshaped, dim=1).contiguous()
-    output_shape = (sum(split_sizes), fused.shape[1], head_dim)
-    output = _a2a_staging_buffer("usp_attention_output_qkv", output_shape, fused.dtype, fused.device)
+    output = torch.empty(
+        (sum(split_sizes), fused.shape[1], head_dim),
+        dtype=fused.dtype,
+        device=fused.device,
+    )
     dist.all_to_all_single(
         output,
         fused,
@@ -398,8 +366,11 @@ def ep_dispatch(
     if len(sequence_split_sizes) != group.world_size or sequence_split_sizes[group.rank] != sequence:
         raise ValueError("EP sequence split sizes do not describe the local tensor")
     send = tensor.contiguous().view(sequence, group.world_size, local_heads, dim).permute(1, 0, 2, 3).contiguous()
-    output_shape = (sum(sequence_split_sizes), local_heads, dim)
-    output = _a2a_staging_buffer("ep_dispatch", output_shape, tensor.dtype, tensor.device)
+    output = torch.empty(
+        (sum(sequence_split_sizes), local_heads, dim),
+        dtype=tensor.dtype,
+        device=tensor.device,
+    )
     row_width = local_heads * dim
     dist.all_to_all_single(
         output.view(-1),
@@ -432,8 +403,11 @@ def ep_undispatch(
     sequence = sequence_split_sizes[group.rank]
     local_heads, dim = tensor.shape[1:]
     send = tensor.contiguous()
-    output_shape = (group.world_size, sequence, local_heads, dim)
-    output = _a2a_staging_buffer("ep_undispatch", output_shape, tensor.dtype, tensor.device)
+    output = torch.empty(
+        (group.world_size, sequence, local_heads, dim),
+        dtype=tensor.dtype,
+        device=tensor.device,
+    )
     row_width = local_heads * dim
     dist.all_to_all_single(
         output.view(-1),
