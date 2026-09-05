@@ -11,9 +11,9 @@ MagiCompiler and external Triton runtime dependencies.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
-import logging
 from collections.abc import Callable
 
 import torch
@@ -24,6 +24,7 @@ import torch.nn.functional as F
 from .parallel import Magi2ParallelGroup, get_magi2_tp_group
 
 logger = logging.getLogger(__name__)
+_SWIGLU7_FUSED_DISABLED = False
 
 
 def swiglu7(
@@ -34,7 +35,31 @@ def swiglu7(
 ) -> torch.Tensor:
     """Released GPT-OSS-style clamped SwiGLU activation."""
 
+    global _SWIGLU7_FUSED_DISABLED
     out_dtype = x.dtype if out_dtype is None else out_dtype
+    use_fused = (
+        not _SWIGLU7_FUSED_DISABLED
+        and os.environ.get("MAGI2_USE_FUSED_SWIGLU7", "1") == "1"
+        and os.environ.get("MAGI2_DETERMINISTIC", "0") != "1"
+        and x.device.type in {"musa", "privateuseone"}
+        and x.dtype == torch.bfloat16
+        and out_dtype == x.dtype
+        and x.is_contiguous()
+        and x.shape[-1] % 2 == 0
+        and alpha == 1.702
+        and limit == 7.0
+    )
+    if use_fused:
+        try:
+            from .swiglu_kernel import magi2_swiglu7
+
+            return magi2_swiglu7(x)
+        except Exception as exc:
+            _SWIGLU7_FUSED_DISABLED = True
+            logger.warning(
+                "MUSA fused MAGI-2 SwiGLU7 failed; using eager fallback: %s",
+                exc,
+            )
     x = x.to(torch.float32)
     gate, linear = x[..., ::2], x[..., 1::2]
     gate = gate.clamp(max=limit)
