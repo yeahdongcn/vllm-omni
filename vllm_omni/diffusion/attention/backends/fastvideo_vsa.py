@@ -333,10 +333,9 @@ class FastVideoVSABackend(AttentionBackend):
         # FastVideo accepts variable-sized edge blocks. This lets packed
         # [real, pad] inputs run on their valid prefix without materializing an
         # attention mask; the implementation restores the ignored pad rows.
-        # Only forward_cuda honours packed_padding: every other platform hands
-        # the tensors straight to SDPA, which reads attn_mask and nothing else,
-        # so the pad rows would be attended as real keys.
-        return current_omni_platform.is_cuda()
+        # CUDA and MUSA honour packed_padding on both the H3 kernel and
+        # fallback paths. Other platforms still require the explicit mask.
+        return current_omni_platform.is_cuda() or current_omni_platform.is_musa()
 
     @classmethod
     def validate_available(cls) -> None:
@@ -625,7 +624,7 @@ class FastVideoVSAImpl(AttentionImpl):
                 # recover the request.
                 if isinstance(exc, torch.AcceleratorError):
                     raise
-                if not self.fallback_on_error:
+                if current_omni_platform.is_musa() or not self.fallback_on_error:
                     raise
                 return self._fallback(
                     original_query, original_key, original_value, attn_metadata, f"VSA-H3 kernel failed: {exc}"
@@ -751,4 +750,11 @@ class FastVideoVSAImpl(AttentionImpl):
         value: torch.Tensor,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        return self.sdpa_fallback.forward_musa(query, key, value, attn_metadata)
+        # H3's 64-token block map uses the portable Triton implementation.
+        # Other model families retain their existing MUSA fallback.
+        h3_layout = _get_h3_layout(attn_metadata)
+        if attn_metadata is not None and h3_layout is not None:
+            # Propagate H3 kernel errors rather than silently changing the
+            # sparse checkpoint's attention semantics.
+            return self.forward_cuda(query, key, value, attn_metadata)
+        return self._fallback(query, key, value, attn_metadata, "MUSA VSA is supported for H3 only")

@@ -38,6 +38,15 @@ def test_fastvideo_vsa_reports_missing_optional_kernel(monkeypatch):
         FastVideoVSABackend.validate_available()
 
 
+@pytest.mark.parametrize("platform", ["cuda", "musa", "cpu", "npu"])
+def test_packed_mask_free_capability_is_platform_scoped(monkeypatch, platform):
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.attention.backends.fastvideo_vsa.current_omni_platform",
+        types.SimpleNamespace(is_cuda=lambda: platform == "cuda", is_musa=lambda: platform == "musa"),
+    )
+    assert FastVideoVSABackend.supports_packed_mask_free() == (platform in {"cuda", "musa"})
+
+
 def test_fastvideo_vsa_tiles_3d_sequence_and_untiles(monkeypatch):
     calls: dict[str, Any] = {}
     fake_module = types.ModuleType("fastvideo_kernel")
@@ -265,7 +274,37 @@ def _h3_impl(**backend_kwargs):
     return FastVideoVSAImpl(num_heads=2, head_size=8, softmax_scale=8**-0.5, backend_kwargs=kwargs)
 
 
-def test_h3_forward_tiles_untiles_and_restores_the_original_row_order(monkeypatch):
+@pytest.mark.parametrize("is_musa", [False, True])
+def test_h3_musa_kernel_errors_do_not_silently_fall_back(monkeypatch, is_musa):
+    impl = _h3_impl(fallback_on_error=True)
+    query = torch.zeros(1, 37, 2, 8, dtype=torch.bfloat16)
+    metadata = _h3_metadata((5,), (2, 4, 4))
+    fallback_calls = []
+
+    def fail_kernel(*args):
+        raise RuntimeError("sparse kernel failed")
+
+    def fallback(*args):
+        fallback_calls.append(args)
+        return query
+
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.attention.backends.fastvideo_vsa.current_omni_platform",
+        types.SimpleNamespace(is_musa=lambda: is_musa),
+    )
+    monkeypatch.setattr(impl, "_forward_h3", fail_kernel)
+    monkeypatch.setattr(impl, "_fallback", fallback)
+    if is_musa:
+        with pytest.raises(RuntimeError, match="sparse kernel failed"):
+            impl.forward_musa(query, query, query, metadata)
+        assert not fallback_calls
+    else:
+        assert impl.forward_cuda(query, query, query, metadata) is query
+        assert len(fallback_calls) == 1
+
+
+@pytest.mark.parametrize("forward_method", ["forward_cuda", "forward_musa"])
+def test_h3_forward_tiles_untiles_and_restores_the_original_row_order(monkeypatch, forward_method):
     calls: dict[str, Any] = {}
     _fake_block_sparse_kernel(monkeypatch, calls)
     impl = _h3_impl(topk=64)
@@ -274,7 +313,7 @@ def test_h3_forward_tiles_untiles_and_restores_the_original_row_order(monkeypatc
     torch.manual_seed(0)
     query = torch.randn(1, seq_len, 2, 8, dtype=torch.bfloat16)
 
-    output = impl.forward_cuda(query, query, query, _h3_metadata(prefix_segments, video_shape))
+    output = getattr(impl, forward_method)(query, query, query, _h3_metadata(prefix_segments, video_shape))
 
     assert output.shape == query.shape
     # topk covers every video block, so the block map is dense and the tiled
@@ -334,7 +373,8 @@ def test_h3_forward_applies_the_learned_compression_gate(monkeypatch):
     assert not torch.allclose(with_live_gate.float(), without_gate.float())
 
 
-def test_h3_forward_restores_rows_the_packed_padding_excludes(monkeypatch):
+@pytest.mark.parametrize("forward_method", ["forward_cuda", "forward_musa"])
+def test_h3_forward_restores_rows_the_packed_padding_excludes(monkeypatch, forward_method):
     _fake_block_sparse_kernel(monkeypatch, {})
     impl = _h3_impl(topk=64)
     prefix_segments, video_shape = (5,), (2, 4, 4)
@@ -348,13 +388,16 @@ def test_h3_forward_restores_rows_the_packed_padding_excludes(monkeypatch):
         cu_seqlens_k=torch.tensor([0, valid], dtype=torch.int32),
     )
 
-    output = impl.forward_cuda(query, query, query, _h3_metadata(prefix_segments, video_shape, packed_padding=padding))
+    output = getattr(impl, forward_method)(
+        query, query, query, _h3_metadata(prefix_segments, video_shape, packed_padding=padding)
+    )
 
     assert output.shape == query.shape
     assert torch.count_nonzero(output[:, valid:]) == 0
 
 
-def test_sdpa_fallback_never_attends_the_structural_padding(monkeypatch):
+@pytest.mark.parametrize("forward_method", ["forward_cuda", "forward_musa"])
+def test_sdpa_fallback_never_attends_the_structural_padding(monkeypatch, forward_method):
     # The backend advertises supports_packed_mask_free, so MiniMax-H3 skips
     # building the padding mask. Every fallback out of the VSA path must honour
     # that contract itself; SDPA reads attn_mask and nothing else.
@@ -374,10 +417,10 @@ def test_sdpa_fallback_never_attends_the_structural_padding(monkeypatch):
         cu_seqlens_k=torch.tensor([0, valid], dtype=torch.int32),
     )
 
-    baseline = impl.forward_cuda(query, query, query, AttentionMetadata(packed_padding=padding, extra={}))
+    baseline = getattr(impl, forward_method)(query, query, query, AttentionMetadata(packed_padding=padding, extra={}))
     perturbed_input = query.clone()
     perturbed_input[:, valid:] += 100.0
-    perturbed = impl.forward_cuda(
+    perturbed = getattr(impl, forward_method)(
         perturbed_input, perturbed_input, perturbed_input, AttentionMetadata(packed_padding=padding, extra={})
     )
 

@@ -107,6 +107,36 @@ loading excluded. The three measured static outputs matched the dynamic
 baseline MP4 byte-for-byte. These timings use dense FlashAttention and the
 dense adapter; they are not VSA results.
 
+### Eight-GPU P0 screening (2026-09-05)
+
+The following experiments use the same single-request workload as the static
+compile control: 1344x768, requested 15 seconds at 24 FPS, seed 1501 and four
+FastH3 steps. Each median excludes a separate warmup and contains three
+requests. Server E2E includes MP4 handling; it is not isolated DiT latency.
+These are T2VA requests through the FL2VA pipeline, not Ref2VA video inputs.
+
+| Configuration | Generation median (s) | Server E2E median (s) |
+| --- | ---: | ---: |
+| Dense TP8, static regional compile | 51.859 | 54.344 |
+| Experimental VSA TP8, top-k 64 | 47.928 | 50.286 |
+| Dense TP1, HSDP8 + Ulysses8 | 50.839 | 53.362 |
+| Dense TP2 + Ulysses4 | 55.495 | 57.919 |
+| Dense TP4 + Ulysses2 | 57.854 | 60.205 |
+| Dense TP8, TORCH_SDPA | 66.495 | 69.020 |
+| Dense TP8, eager diagnostic | 52.503 | 54.974 |
+| Dense TP8, experimental full-DiT graph cache | 52.178 | 54.762 |
+
+Keep static TP8 as the dense recommendation: the HSDP8 difference is inside
+the measurement noise gate. The bounded graph experiment captured on all
+eight ranks and preserved byte-identical dense outputs across 15s/4s/15s
+requests, but did not improve E2E and is not enabled by this recipe.
+
+VSA reduces this workload's E2E by about 7.5%, but uses the separate
+`vsa-datafree` adapter. It is not a numerically equivalent replacement for the
+dense adapter. Repeated outputs decode and sampled frames are coherent;
+full human perceptual review remains required. Do not extrapolate these
+measurements to reference-video inputs, other resolutions or concurrency.
+
 ### Disaggregated T2VA/FL2VA (TE2 + DiT4)
 
 For separate text-encoder and diffusion stages, use the MUSA deploy
@@ -173,6 +203,30 @@ package is built for CUDA/CUTLASS Hopper and Blackwell kernels and is not a
 MUSA dependency. Do not select `FASTVIDEO_VSA` unless a MUSA implementation is
 installed and validated; the dense FastH3 adapter works with the MUSA
 `FLASH_ATTN` backend.
+
+The experimental MUSA route uses the unchanged 64-token Triton kernel from
+FastVideo 0.3.5, with `FASTVIDEO_VSA_TRITON=1` and
+`FASTVIDEO_VSA_SM100A=0`. A MUSA-compatible package import route must expose
+`block_sparse_attn` and `block_sparse_attn_from_indices` without importing
+the CUDA-native operators. This dependency packaging is not supplied by the
+stock CUDA wheel. The Omni H3 path reuses existing tiling, padding restoration
+and masked fallback helpers; H3 kernel errors propagate rather than silently
+switching to dense attention. Non-H3 branches retain masked SDPA fallback.
+
+After preparing that dependency, the changes from the dense command are:
+
+```bash
+export FASTVIDEO_VSA_TRITON=1
+export FASTVIDEO_VSA_SM100A=0
+# Set the following options on the eight-GPU serving command:
+# --diffusion-attention-backend FASTVIDEO_VSA
+# --fastvideo-vsa-topk 64
+# --lora-path /models/FastVideo/FastVideo-FastH3-4-step-Preview-v1-LoRA/vsa-datafree/adapter_model.safetensors
+```
+
+The focused backend suite passes 23 tests, covering CUDA/MUSA H3 dispatch,
+packed-padding restoration, fallback mask semantics and MUSA error handling.
+Those tests do not establish that every non-H3 model supports MUSA VSA.
 
 An S5000 correctness validation on 2026-09-05 used vLLM 0.28.0,
 vLLM-MUSA 0.1.28, vLLM-Omni main at `0f9ee6af` plus the MUSA event fix,
