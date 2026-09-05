@@ -24,6 +24,14 @@ import torch.nn.functional as F
 from .parallel import Magi2ParallelGroup, get_magi2_tp_group
 
 logger = logging.getLogger(__name__)
+
+
+def _regional_compile_opaque(fn):
+    """Keep stateful mHC parameter adapters outside Dynamo diagnostics."""
+
+    if os.environ.get("MAGI2_DISABLE_MHC_COMPILE") == "1":
+        return torch.compiler.disable(fn)
+    return fn
 _SWIGLU7_FUSED_DISABLED = False
 
 
@@ -481,6 +489,7 @@ class MHCHandler:
         self._check_multi(tensor)
         return tensor.view(tensor.shape[0], -1)
 
+    @_regional_compile_opaque
     def compute_logits(
         self,
         flattened: torch.Tensor,
