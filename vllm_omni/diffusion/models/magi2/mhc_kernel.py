@@ -18,26 +18,28 @@ def _mhc_coefficients_kernel(
     bias_post_ptr,
     alpha_residual_ptr,
     bias_residual_ptr,
-    out_ptr,
+    post_out_ptr,
+    residual_out_ptr,
     post_stride,
     residual_stride,
     scale,
     eps,
-    hidden: tl.constexpr,
     NUM_ITERS: tl.constexpr,
 ):
     """Fuse MAGI-2 coefficient affine transforms and Sinkhorn normalization.
 
     The input views are the post-split portions of the [tokens, 24] projection,
     hence their token stride is intentionally a runtime value (normally 24).
-    The output packs BF16 post coefficients followed by the BF16 residual
-    matrix; callers materialize contiguous views before the connection kernel.
+    Both outputs are contiguous BF16 tensors consumed by the connection
+    kernel, without intermediate packed tensors or layout copies.
     """
 
     token = tl.program_id(0)
     post_offs = tl.arange(0, 4)
     residual_offs = tl.arange(0, 16)
-    post_logits = tl.load(post_logits_ptr + token * post_stride + post_offs).to(tl.float32)
+    post_logits = tl.load(post_logits_ptr + token * post_stride + post_offs).to(
+        tl.float32
+    )
     residual_logits = tl.load(
         residual_logits_ptr + token * residual_stride + residual_offs
     ).to(tl.float32)
@@ -73,9 +75,8 @@ def _mhc_coefficients_kernel(
         )
         matrix = matrix / (row_sum + eps)
 
-    out_base = out_ptr + token * 20
-    tl.store(out_base + post_offs, post.to(tl.bfloat16))
-    tl.store(out_base + 4 + residual_offs, matrix.to(tl.bfloat16))
+    tl.store(post_out_ptr + token * 4 + post_offs, post.to(tl.bfloat16))
+    tl.store(residual_out_ptr + token * 16 + residual_offs, matrix.to(tl.bfloat16))
 
 
 def _mhc_coefficients(
@@ -89,7 +90,7 @@ def _mhc_coefficients(
     scale: float,
     num_iters: int,
     eps: float,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     if post_logits.ndim != 2 or post_logits.shape[-1] != 4:
         raise ValueError("expected post logits shape [tokens, 4]")
     if residual_logits.ndim != 3 or residual_logits.shape[-2:] != (4, 4):
@@ -97,11 +98,18 @@ def _mhc_coefficients(
     if post_logits.shape[0] != residual_logits.shape[0]:
         raise ValueError("post and residual token counts must match")
     if post_logits.stride(-1) != 1 or residual_logits.stride()[-2:] != (4, 1):
-        raise ValueError("mHC coefficient views must be contiguous in their stream dimensions")
+        raise ValueError(
+            "mHC coefficient views must be contiguous in their stream dimensions"
+        )
     if num_iters > 64:
         raise ValueError("MAGI-2 fused Sinkhorn requires iters<=64")
     tokens = post_logits.shape[0]
-    out = torch.empty((tokens, 20), dtype=torch.bfloat16, device=post_logits.device)
+    post_out = torch.empty((tokens, 4), dtype=torch.bfloat16, device=post_logits.device)
+    residual_out = torch.empty(
+        (tokens, 4, 4), dtype=torch.bfloat16, device=post_logits.device
+    )
+    if tokens == 0:
+        return post_out, residual_out
     _mhc_coefficients_kernel[(tokens,)](
         post_logits,
         residual_logits,
@@ -109,16 +117,17 @@ def _mhc_coefficients(
         bias_post,
         alpha_residual,
         bias_residual,
-        out,
+        post_out,
+        residual_out,
         post_logits.stride(0),
         residual_logits.stride(0),
         scale,
         eps,
-        hidden=4,
         NUM_ITERS=num_iters,
         num_warps=1,
+        enable_fp_fusion=False,
     )
-    return out
+    return post_out, residual_out
 
 
 @triton.jit
@@ -256,7 +265,6 @@ def _mhc_sinkhorn(
     return out
 
 
-
 def _mhc_mix_output_fake(
     streams: torch.Tensor,
     block_out: torch.Tensor,
@@ -266,7 +274,9 @@ def _mhc_mix_output_fake(
     return torch.empty_like(streams)
 
 
-def _mhc_sinkhorn_fake(logits: torch.Tensor, *, num_iters: int, eps: float) -> torch.Tensor:
+def _mhc_sinkhorn_fake(
+    logits: torch.Tensor, *, num_iters: int, eps: float
+) -> torch.Tensor:
     return torch.empty_like(logits, dtype=torch.float32)
 
 
@@ -281,10 +291,17 @@ def _mhc_coefficients_fake(
     scale: float,
     num_iters: int,
     eps: float,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     del alpha_post, bias_post, alpha_residual, bias_residual, scale, num_iters, eps
-    return torch.empty(
-        (post_logits.shape[0], 20), dtype=torch.bfloat16, device=post_logits.device
+    return (
+        torch.empty(
+            (post_logits.shape[0], 4), dtype=torch.bfloat16, device=post_logits.device
+        ),
+        torch.empty(
+            (post_logits.shape[0], 4, 4),
+            dtype=torch.bfloat16,
+            device=post_logits.device,
+        ),
     )
 
 

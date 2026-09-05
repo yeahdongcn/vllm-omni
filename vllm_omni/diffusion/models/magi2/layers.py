@@ -565,7 +565,7 @@ class MHCHandler:
             try:
                 from .mhc_kernel import mhc_coefficients
 
-                packed = mhc_coefficients(
+                return mhc_coefficients(
                     post_logits,
                     residual_logits,
                     alpha_post,
@@ -576,9 +576,6 @@ class MHCHandler:
                     num_iters=self.sinkhorn_iterations,
                     eps=self.sinkhorn_epsilon,
                 )
-                post_coefficients = packed[:, :4].contiguous()
-                residual_matrix = packed[:, 4:].reshape(-1, 4, 4).contiguous()
-                return post_coefficients, residual_matrix
             except Exception as exc:
                 logger.warning(
                     "MAGI-2 fused mHC coefficient kernel failed; using reference path: %s",

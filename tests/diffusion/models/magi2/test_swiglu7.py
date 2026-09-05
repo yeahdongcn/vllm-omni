@@ -10,10 +10,10 @@ from vllm_omni.diffusion.models.magi2.layers import MHCHandler, swiglu7
 
 def test_mhc_coefficient_fusion_preserves_cpu_reference_and_strides(monkeypatch):
     torch.manual_seed(29)
-    handler = MHCHandler(4, 2)
+    handler = MHCHandler(4, 2560)
     packed = torch.randn(5, 24, dtype=torch.float32)
-    post_logits = packed[:, :4]
-    residual_logits = packed[:, 4:].reshape(5, 4, 4)
+    post_logits = packed[:, 4:8]
+    residual_logits = packed[:, 8:].reshape(5, 4, 4)
     post = (
         torch.tensor([1.3]),
         torch.randn(4),
