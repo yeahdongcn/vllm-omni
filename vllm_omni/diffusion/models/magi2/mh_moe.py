@@ -252,7 +252,7 @@ def _magi2_sgl_fused_moe_forward(
     import triton.language as tl
 
     block_n = int(os.environ.get("MAGI2_SGL_BLOCK_N", "128"))
-    block_k = int(os.environ.get("MAGI2_SGL_BLOCK_K", "32"))
+    block_k = int(os.environ.get("MAGI2_SGL_BLOCK_K", "64"))
     if block_n not in (64, 128, 256, 512) or block_k not in (16, 32, 64, 128):
         raise ValueError("invalid MAGI2 SGL tile config")
     num_warps = int(os.environ.get("MAGI2_SGL_NUM_WARPS", "16"))
