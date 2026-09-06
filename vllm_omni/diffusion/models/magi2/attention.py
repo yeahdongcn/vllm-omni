@@ -160,7 +160,9 @@ def apply_rotary_emb(
     # MUSA; the arithmetic order remains the same pairwise rotation.
     if (
         not interleaved
-        and os.environ.get("MAGI2_FAST_ROPE", "0") == "1"
+        # This pairwise MUSA path is numerically equivalent and is the
+        # validated performance default; set MAGI2_FAST_ROPE=0 to roll back.
+        and os.environ.get("MAGI2_FAST_ROPE", "1") == "1"
         and x.device.type in {"musa", "privateuseone"}
     ):
         cos = cos.to(dtype=x.dtype).unsqueeze(-2)
