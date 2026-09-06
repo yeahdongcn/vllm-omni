@@ -77,3 +77,13 @@ def test_checkpoint_reload_updates_views():
     assert module._get_owned_w13() is not None
     assert torch.equal(module.W_gate, other.W_gate)
     assert torch.equal(module.W_up, other.W_up)
+
+
+def test_owned_w2_layout_and_values():
+    module = make_module()
+    down = module.W_down.clone()
+    module.prepare_owned_w2()
+    assert torch.equal(module._get_owned_w2(), down.transpose(1, 2))
+    assert torch.equal(module.W_down, down)
+    assert module._get_owned_w2().is_contiguous()
+    module.prepare_owned_w2()
