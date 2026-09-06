@@ -199,6 +199,7 @@ def _magi2_sgl_fused_moe_forward(
     w_gate: torch.Tensor,
     w_up: torch.Tensor,
     w_down: torch.Tensor,
+    packed_w13: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """SGLang-compatible fused SwiGLU MoE for MAGI-2's head-routed layout."""
     if x_heads.ndim != 3 or probabilities.ndim != 3 or indices.ndim != 3:
@@ -239,14 +240,19 @@ def _magi2_sgl_fused_moe_forward(
         intermediate_size,
         hidden_size,
     )
-    packed = _SGL_FUSED_MOE_WORKSPACES.get(key)
     shape = (num_experts, 2 * intermediate_size, hidden_size)
-    if packed is None or tuple(packed.shape) != shape:
-        packed = torch.empty(shape, device=w_gate.device, dtype=w_gate.dtype)
-        _SGL_FUSED_MOE_WORKSPACES[key] = packed
-    packed_view = packed.view(num_experts, intermediate_size, 2, hidden_size)
-    packed_view[:, :, 0, :].copy_(w_gate.transpose(1, 2))
-    packed_view[:, :, 1, :].copy_(w_up.transpose(1, 2))
+    if packed_w13 is not None:
+        if tuple(packed_w13.shape) != shape or not packed_w13.is_contiguous():
+            raise ValueError("Invalid prepacked MAGI2 W13 layout")
+        packed = packed_w13
+    else:
+        packed = _SGL_FUSED_MOE_WORKSPACES.get(key)
+        if packed is None or tuple(packed.shape) != shape:
+            packed = torch.empty(shape, device=w_gate.device, dtype=w_gate.dtype)
+            _SGL_FUSED_MOE_WORKSPACES[key] = packed
+        packed_view = packed.view(num_experts, intermediate_size, 2, hidden_size)
+        packed_view[:, :, 0, :].copy_(w_gate.transpose(1, 2))
+        packed_view[:, :, 1, :].copy_(w_up.transpose(1, 2))
 
     kernels = _magi2_sgl_fused_moe_module()
     import triton.language as tl
@@ -976,6 +982,7 @@ class Magi2MultiHeadMoE(nn.Module):
         self.W_down = nn.Parameter(
             torch.empty(self.local_flatten_num_experts, self.d_expert, self.d_head, dtype=config.params_dtype)
         )
+        self.register_buffer("_owned_w13", None, persistent=False)
         self.router = nn.Module()
         # Both tensors are released checkpoint entries.  Non-trainable
         # Parameters let the DLO mmap path bind them on a meta-constructed
@@ -997,6 +1004,45 @@ class Magi2MultiHeadMoE(nn.Module):
                 target = getattr(target, part)
             parameter = getattr(target, parts[-1])
             parameter.mmap_weight_transform = self.ep_slice
+
+    @torch.no_grad()
+    def prepare_owned_w13(self) -> None:
+        """Replace W_gate/W_up storage with SGL's interleaved W13 layout."""
+        if self.W_gate.dtype != torch.bfloat16 or self.W_up.dtype != torch.bfloat16:
+            raise ValueError("Owned W13 requires BF16 gate and up weights")
+        if self._get_owned_w13() is not None:
+            return
+        packed = torch.empty(
+            (self.local_flatten_num_experts, 2 * self.d_expert, self.d_head),
+            dtype=self.W_gate.dtype,
+            device=self.W_gate.device,
+        )
+        views = packed.view(self.local_flatten_num_experts, self.d_expert, 2, self.d_head)
+        gate = views[:, :, 0, :].transpose(1, 2)
+        up = views[:, :, 1, :].transpose(1, 2)
+        gate.copy_(self.W_gate)
+        up.copy_(self.W_up)
+        self.W_gate.data = gate
+        self.W_up.data = up
+        self._owned_w13 = packed
+
+    def _get_owned_w13(self) -> torch.Tensor | None:
+        packed = self._owned_w13
+        if packed is None:
+            return None
+        expected_stride = (2 * self.d_expert * self.d_head, 1, 2 * self.d_head)
+        if (
+            packed.device != self.W_gate.device
+            or packed.dtype != self.W_gate.dtype
+            or self.W_up.device != packed.device
+            or self.W_up.dtype != packed.dtype
+            or self.W_gate.data_ptr() != packed.data_ptr()
+            or self.W_up.data_ptr() != packed.data_ptr() + self.d_head * packed.element_size()
+            or self.W_gate.stride() != expected_stride
+            or self.W_up.stride() != expected_stride
+        ):
+            return None
+        return packed
 
     def ep_slice(self, checkpoint_tensor: torch.Tensor) -> torch.Tensor:
         """Slice flattened ``(head,expert)`` checkpoint rows for this rank."""
@@ -1049,6 +1095,11 @@ class Magi2MultiHeadMoE(nn.Module):
         )
         if use_sgl_fused:
             try:
+                packed_w13 = None
+                if os.environ.get("MAGI2_SGL_OWNED_W13") == "1":
+                    if self._get_owned_w13() is None:
+                        self.prepare_owned_w13()
+                    packed_w13 = self._get_owned_w13()
                 return _magi2_sgl_fused_moe_forward(
                     x_heads,
                     probabilities,
@@ -1056,6 +1107,7 @@ class Magi2MultiHeadMoE(nn.Module):
                     self.W_gate,
                     self.W_up,
                     self.W_down,
+                    packed_w13=packed_w13,
                 )
             except Exception as exc:
                 logger.warning(
