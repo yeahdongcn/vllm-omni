@@ -251,13 +251,21 @@ def _magi2_sgl_fused_moe_forward(
     kernels = _magi2_sgl_fused_moe_module()
     import triton.language as tl
 
+    block_n = int(os.environ.get("MAGI2_SGL_BLOCK_N", "128"))
+    block_k = int(os.environ.get("MAGI2_SGL_BLOCK_K", "32"))
+    if block_n not in (64, 128, 256, 512) or block_k not in (16, 32, 64, 128):
+        raise ValueError("invalid MAGI2 SGL tile config")
+    num_warps = int(os.environ.get("MAGI2_SGL_NUM_WARPS", "16"))
+    num_stages = int(os.environ.get("MAGI2_SGL_NUM_STAGES", "1"))
+    if num_warps not in (4, 8, 16, 32) or num_stages not in (1, 2, 3, 4):
+        raise ValueError("invalid MAGI2 SGL launch config")
     config = {
         "BLOCK_SIZE_M": 128,
-        "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 32,
+        "BLOCK_SIZE_N": block_n,
+        "BLOCK_SIZE_K": block_k,
         "GROUP_SIZE_M": 16,
-        "num_warps": 16,
-        "num_stages": 1,
+        "num_warps": num_warps,
+        "num_stages": num_stages,
     }
     # c_sorted=False uses original route IDs and masks padded rows with
     # num_valid_tokens; only real routed rows need intermediate storage.
