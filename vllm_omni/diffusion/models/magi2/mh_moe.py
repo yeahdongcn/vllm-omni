@@ -275,6 +275,9 @@ def _magi2_sgl_fused_moe_forward(
         "num_warps": num_warps,
         "num_stages": num_stages,
     }
+    config_down = dict(config)
+    if packed_w13 is not None and os.environ.get("MAGI2_SGL_BLOCK_K") is None:
+        config_down["BLOCK_SIZE_K"] = 64
     # c_sorted=False uses original route IDs and masks padded rows with
     # num_valid_tokens; only real routed rows need intermediate storage.
     # Keep zero initialization for any filtered experts.
@@ -336,7 +339,7 @@ def _magi2_sgl_fused_moe_forward(
         num_padded,
         True,
         1,
-        config,
+        config_down,
         tl.bfloat16,
         False,
         False,
