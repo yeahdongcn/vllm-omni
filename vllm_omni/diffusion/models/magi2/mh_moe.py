@@ -259,15 +259,10 @@ def _magi2_sgl_fused_moe_forward(
         "num_warps": 16,
         "num_stages": 1,
     }
-    # The aligner pads each expert to a full tile.  The generic MUSA kernel
-    # does not guarantee writes for sentinel rows on every Triton revision;
-    # zero-initialize them so padded routes cannot leak uninitialized values
-    # into the down-projection (notably the audio branch).
-    # The helper returns a capacity-sized buffer for the normal MUSA path and
-    # a published-length slice for the optional dynamic rollback. In both
-    # cases the shape is the correct allocation size; the kernel reads the
-    # actual row count from ``num_padded`` on device.
-    intermediate_rows = sorted_ids.shape[0]
+    # c_sorted=False uses original route IDs and masks padded rows with
+    # num_valid_tokens; only real routed rows need intermediate storage.
+    # Keep zero initialization for any filtered experts.
+    intermediate_rows = route_ids.numel()
     intermediate = torch.zeros(
         (intermediate_rows, intermediate_size),
         device=x_heads.device,
