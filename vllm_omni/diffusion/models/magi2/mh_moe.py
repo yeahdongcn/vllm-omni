@@ -1131,12 +1131,14 @@ class Magi2MultiHeadMoE(nn.Module):
         if use_sgl_fused:
             try:
                 packed_w13 = None
-                if os.environ.get("MAGI2_SGL_OWNED_W13") == "1":
+                # The memory-neutral owned layouts are the qualified MUSA
+                # default; set either variable to 0 for an emergency rollback.
+                if os.environ.get("MAGI2_SGL_OWNED_W13", "1") == "1":
                     if self._get_owned_w13() is None:
                         self.prepare_owned_w13()
                     packed_w13 = self._get_owned_w13()
                 packed_w2 = None
-                if os.environ.get("MAGI2_SGL_OWNED_W2") == "1":
+                if os.environ.get("MAGI2_SGL_OWNED_W2", "1") == "1":
                     if self._get_owned_w2() is None:
                         self.prepare_owned_w2()
                     packed_w2 = self._get_owned_w2()
