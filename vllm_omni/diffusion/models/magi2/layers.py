@@ -565,16 +565,6 @@ class MHCHandler:
             try:
                 from .mhc_kernel import mhc_coefficients
 
-                sinkhorn_iterations = self.sinkhorn_iterations
-                override = os.environ.get("MAGI2_MHC_FUSED_SINKHORN_ITERS")
-                if override is not None:
-                    sinkhorn_iterations = int(override)
-                    if not 1 <= sinkhorn_iterations <= self.sinkhorn_iterations:
-                        raise ValueError(
-                            "MAGI2_MHC_FUSED_SINKHORN_ITERS must be between 1 and "
-                            f"{self.sinkhorn_iterations}, got {sinkhorn_iterations}"
-                        )
-
                 return mhc_coefficients(
                     post_logits,
                     residual_logits,
@@ -583,7 +573,7 @@ class MHCHandler:
                     alpha_residual,
                     bias_residual,
                     scale=self.matmul_scale,
-                    num_iters=sinkhorn_iterations,
+                    num_iters=self.sinkhorn_iterations,
                     eps=self.sinkhorn_epsilon,
                 )
             except Exception as exc:
