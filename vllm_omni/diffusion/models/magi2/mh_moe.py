@@ -278,10 +278,15 @@ def _magi2_sgl_fused_moe_forward(
     config_down = dict(config)
     if packed_w13 is not None and os.environ.get("MAGI2_SGL_BLOCK_K") is None:
         config_down["BLOCK_SIZE_K"] = 64
-    # c_sorted=False uses original route IDs and masks padded rows with
-    # num_valid_tokens; only real routed rows need intermediate storage.
-    # Keep zero initialization for any filtered experts.
-    intermediate_rows = route_ids.numel()
+    sorted_intermediate = (
+        os.environ.get("MAGI2_SGL_SORTED_INTERMEDIATE", "0") == "1"
+        and hidden.dtype == torch.bfloat16
+        and packed_w13 is not None
+        and config_down.get("BLOCK_SIZE_M") == config.get("BLOCK_SIZE_M")
+    )
+    # Include padding when retaining expert-sorted rows between W13 and W2.
+    # Filtered-expert rows remain zero.
+    intermediate_rows = sorted_ids.numel() if sorted_intermediate else route_ids.numel()
     intermediate = torch.zeros(
         (intermediate_rows, intermediate_size),
         device=x_heads.device,
@@ -310,7 +315,7 @@ def _magi2_sgl_fused_moe_forward(
         False,
         False,
         no_combine=True,
-        c_sorted=False,
+        c_sorted=sorted_intermediate,
         filter_expert=True,
         fuse_swiglu=True,
         swiglu_alpha=1.702,
@@ -348,6 +353,7 @@ def _magi2_sgl_fused_moe_forward(
         False,
         no_combine=False,
         c_sorted=False,
+        a_sorted=sorted_intermediate,
         filter_expert=True,
     )
     # SGLang's MUSA AOT ``moe_sum_reduce`` combines the six routed rows in

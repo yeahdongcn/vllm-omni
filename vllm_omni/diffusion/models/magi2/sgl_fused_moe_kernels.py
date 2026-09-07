@@ -410,6 +410,7 @@ def fused_moe_kernel(
     per_channel_quant: tl.constexpr,
     even_Ks: tl.constexpr,
     c_sorted: tl.constexpr,
+    a_sorted: tl.constexpr,
     filter_expert: tl.constexpr,
     swap_ab: tl.constexpr,
     FUSE_ADD_TO_OUTPUT: tl.constexpr,
@@ -509,9 +510,13 @@ def fused_moe_kernel(
         assert use_fp8_w8a8 and group_n > 0 and group_k > 0
         start_offs_m = pid_m * BLOCK_SIZE_M
     else:
-        a_ptrs = a_ptr + (
-            offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
-        )
+        # Retain the original route id for masking and output scatter, while
+        # reading the first GEMM's expert-sorted output by sorted position.
+        if a_sorted:
+            a_rows = offs_token_id
+        else:
+            a_rows = offs_token // top_k
+        a_ptrs = a_ptr + (a_rows[:, None] * stride_am + offs_k[None, :] * stride_ak)
 
     if b_desc is not None:
         start_offs_n = pid_n * BLOCK_SIZE_N
@@ -853,9 +858,16 @@ def invoke_fused_moe_kernel(
     fuse_swiglu: bool = False,
     swiglu_alpha: Optional[float] = None,
     swiglu_limit: Optional[float] = None,
+    a_sorted: bool = False,
 ) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
+    if a_sorted:
+        if (A.dtype != torch.bfloat16 or use_fp8_w8a8 or use_int8_w8a8
+                or use_int8_w8a16 or use_int4_w4a16 or a_use_tma or b_use_tma):
+            raise ValueError("sorted MoE input currently supports plain BF16 only")
+        if A.shape[0] < sorted_token_ids.numel():
+            raise ValueError("sorted MoE input must cover the padded route capacity")
 
     if fuse_swiglu:
         # The epilogue assumes an interleaved-gate/up bf16 up-GEMM writing a
@@ -1073,6 +1085,7 @@ def invoke_fused_moe_kernel(
             per_channel_quant=per_channel_quant,
             even_Ks=even_Ks,
             c_sorted=c_sorted,
+            a_sorted=a_sorted,
             filter_expert=filter_expert,
             swap_ab=swap_ab,
             FUSE_ADD_TO_OUTPUT=fuse_add_to_output,
