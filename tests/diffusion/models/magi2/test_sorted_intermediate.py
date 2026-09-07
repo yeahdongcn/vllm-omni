@@ -34,33 +34,43 @@ def test_sorted_input_requires_padding_capacity():
         )
 
 
-@pytest.mark.parametrize("rows,top_k,skew", [(1, 2, False), (129, 6, False), (257, 6, True)])
-@pytest.mark.parametrize("fused_swiglu", [False, True])
-def test_sorted_intermediate_matches_unsorted(rows, top_k, skew, fused_swiglu, monkeypatch):
+@pytest.mark.parametrize("rows,heads,skew", [(1, 1, False), (129, 2, False), (257, 2, True)])
+@pytest.mark.parametrize("filtered_expert", [False, True])
+def test_sorted_intermediate_matches_unsorted(rows, heads, skew, filtered_expert, monkeypatch):
     if not getattr(torch.version, "musa", None) or torch.musa.device_count() == 0:
         pytest.skip("requires a leased MUSA GPU")
     torch.manual_seed(42)
     device = "musa:0"
-    experts, hidden, intermediate = 8, 256, 1280
-    x = torch.randn(rows, hidden, device=device, dtype=torch.bfloat16) * 0.1
+    top_k, local_experts, hidden, intermediate = 6, 8, 256, 1280
+    experts = local_experts * heads
+    x = torch.randn(rows, heads, hidden, device=device, dtype=torch.bfloat16) * 0.1
     wg = torch.randn(experts, hidden, intermediate, device=device, dtype=torch.bfloat16) * 0.02
     wu = torch.randn_like(wg) * 0.02
     wd = torch.randn(experts, intermediate, hidden, device=device, dtype=torch.bfloat16) * 0.02
-    ids = torch.stack([torch.randperm(experts)[:top_k] for _ in range(rows)])
+    ids = torch.stack([torch.randperm(local_experts)[:top_k] for _ in range(rows * heads)])
     if skew:
         ids[:] = torch.arange(top_k)
-    ids = ids.to(device=device, dtype=torch.int32)
-    weights = torch.softmax(torch.randn(rows, top_k, device=device), dim=-1)
+    ids = ids.reshape(heads, rows, top_k).to(device=device, dtype=torch.int32)
+    weights = torch.softmax(torch.randn(heads, rows, top_k, device=device), dim=-1)
     packed = torch.stack([wg.transpose(1, 2), wu.transpose(1, 2)], dim=2).flatten(1, 2)
     packed_down = wd.transpose(1, 2).contiguous()
-    monkeypatch.setenv("MAGI2_USE_FUSED_SWIGLU7", str(int(fused_swiglu)))
+    if filtered_expert:
+        original_align = mh_moe._magi2_align_block_size
+
+        def align_with_filtered_block(*args, **kwargs):
+            sorted_ids, expert_ids, num_padded = original_align(*args, **kwargs)
+            expert_ids = expert_ids.clone()
+            expert_ids[0] = -1
+            return sorted_ids, expert_ids, num_padded
+
+        monkeypatch.setattr(mh_moe, "_magi2_align_block_size", align_with_filtered_block)
     monkeypatch.setenv("MAGI2_SGL_SORTED_INTERMEDIATE", "0")
     reference = mh_moe._magi2_sgl_fused_moe_forward(
-        x, ids, weights, wg, wu, wd, packed_w13=packed, packed_w2=packed_down
+        x, weights, ids, wg, wu, wd, packed_w13=packed, packed_w2=packed_down
     )
     monkeypatch.setenv("MAGI2_SGL_SORTED_INTERMEDIATE", "1")
     actual = mh_moe._magi2_sgl_fused_moe_forward(
-        x, ids, weights, wg, wu, wd, packed_w13=packed, packed_w2=packed_down
+        x, weights, ids, wg, wu, wd, packed_w13=packed, packed_w2=packed_down
     )
     torch.musa.synchronize()
     assert torch.isfinite(actual).all()
