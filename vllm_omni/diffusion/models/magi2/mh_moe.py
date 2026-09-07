@@ -279,7 +279,9 @@ def _magi2_sgl_fused_moe_forward(
     if packed_w13 is not None and os.environ.get("MAGI2_SGL_BLOCK_K") is None:
         config_down["BLOCK_SIZE_K"] = 64
     sorted_intermediate = (
-        os.environ.get("MAGI2_SGL_SORTED_INTERMEDIATE", "0") == "1"
+        # Validated on S5000; set MAGI2_SGL_SORTED_INTERMEDIATE=0 to roll
+        # back if a downstream custom kernel lacks sorted-row support.
+        os.environ.get("MAGI2_SGL_SORTED_INTERMEDIATE", "1") == "1"
         and hidden.dtype == torch.bfloat16
         and packed_w13 is not None
         and config_down.get("BLOCK_SIZE_M") == config.get("BLOCK_SIZE_M")
