@@ -463,6 +463,17 @@ class MHCHandler:
 
     def _bf16_phi(self, phi_fused: torch.Tensor) -> torch.Tensor:
         """Cache the tiny BF16 projection matrix without changing state dicts."""
+        # Regional compiled MAGI-2 regions cannot trace ``data_ptr`` or the
+        # Python tuple comparison used by the eager cache below.  The
+        # parameter is immutable during inference, so keep one compile-safe
+        # tensor per handler and retain the version/device-aware path for
+        # eager execution and checkpoint reloads.
+        if torch.compiler.is_compiling():
+            compiled_value = getattr(self, "_compiled_phi_fused_bf16", None)
+            if compiled_value is None:
+                compiled_value = phi_fused.detach().to(dtype=torch.bfloat16).contiguous()
+                self._compiled_phi_fused_bf16 = compiled_value
+            return compiled_value
         key = id(phi_fused)
         source = self._parameter_source(phi_fused)
         cached = self._phi_fused_bf16.get(key)
