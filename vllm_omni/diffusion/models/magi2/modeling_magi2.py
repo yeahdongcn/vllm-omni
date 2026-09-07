@@ -376,11 +376,12 @@ class Magi2PreAdapter(nn.Module):
         # Every token belongs to exactly one modality, so the three copies
         # below cover the whole buffer.  Embedding in fp32 and rounding each
         # modality once matches the released cast at the block boundary.
-        output = torch.empty(
-            packed.shape[0],
-            self.adapter_dim,
-            dtype=self.config.params_dtype,
-            device=packed.device,
+        # ``Tensor.new_empty`` keeps the device in the tensor receiver.  The
+        # explicit ``device=packed.device`` form is valid eager Python but is
+        # emitted as an unbound ``device(...)`` symbol by the pinned MUSA
+        # torch.compile backend.
+        output = packed.new_empty(
+            (packed.shape[0], self.adapter_dim), dtype=self.config.params_dtype
         )
         for indices, embedder, in_channels in (
             (text_indices, self.text_embedder, self.config.text_in_channels),
@@ -420,11 +421,8 @@ class Magi2PostAdapter(nn.Module):
         video_indices: torch.Tensor,
         audio_indices: torch.Tensor,
     ) -> torch.Tensor:
-        output = torch.zeros(
-            hidden_states.shape[0],
-            self.final_out_dim,
-            dtype=torch.float32,
-            device=hidden_states.device,
+        output = hidden_states.new_zeros(
+            (hidden_states.shape[0], self.final_out_dim), dtype=torch.float32
         )
         if video_indices.numel():
             video = self.final_norm_video(hidden_states.index_select(0, video_indices).float())
