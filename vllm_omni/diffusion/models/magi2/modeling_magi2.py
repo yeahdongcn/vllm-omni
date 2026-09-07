@@ -727,6 +727,16 @@ class Magi2PreviewTransformer(nn.Module):
     def compile_regions(self, **compile_kwargs: Any) -> None:
         """Compile the dense compute between the eager attention and MoE kernels."""
 
+        # MUSA sees distinct symbolic head/sequence specializations across
+        # CFG/SP workers. The upstream default (8) hard-fails before the
+        # regional cache can settle; keep the higher limit scoped to MAGI-2
+        # regional compilation and allow deployments to lower/raise it.
+        if getattr(torch.version, "musa", None) is not None:
+            import torch._dynamo.config as _dynamo_config
+
+            requested_limit = int(os.environ.get("MAGI2_COMPILE_RECOMPILE_LIMIT", "64"))
+            _dynamo_config.recompile_limit = max(_dynamo_config.recompile_limit, requested_limit)
+
         self.pre_adapter.forward = torch.compile(self.pre_adapter.forward, **compile_kwargs)
         self.post_adapter.forward = torch.compile(self.post_adapter.forward, **compile_kwargs)
         for layer in self.block.layers:
