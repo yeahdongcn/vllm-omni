@@ -732,6 +732,15 @@ class Magi2PreviewTransformer(nn.Module):
 
             requested_limit = int(os.environ.get("MAGI2_COMPILE_RECOMPILE_LIMIT", "64"))
             _dynamo_config.recompile_limit = max(_dynamo_config.recompile_limit, requested_limit)
+            if (
+                os.environ.get("MAGI2_MUSA_REGION_GRAPHS", "0") == "1"
+                or os.environ.get("MAGI2_MUSA_FULL_TORCH_CPP", "0") == "1"
+            ):
+                from torch._inductor import config as _inductor_config
+
+                # This MUSA stack still emits the full Torch CPU prefix for
+                # scalar helper kernels, not the standalone header-only ABI.
+                _inductor_config.aot_inductor.link_libtorch = None
             if os.environ.get("MAGI2_MUSA_REGION_GRAPHS", "0") == "1":
                 compile_kwargs = dict(compile_kwargs)
                 compile_kwargs["options"] = {
