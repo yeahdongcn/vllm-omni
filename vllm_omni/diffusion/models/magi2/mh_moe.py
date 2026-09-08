@@ -57,18 +57,14 @@ def _magi2_align_block_size_fixed_capacity(
     route_count = ids.numel()
     capacity = max(route_count + num_experts * (block_size - 1), block_size)
     max_blocks = (capacity + block_size - 1) // block_size
-    sorted_ids = torch.full(
-        (capacity,), route_count, device=ids.device, dtype=torch.int32
-    )
+    sorted_ids = torch.full((capacity,), route_count, device=ids.device, dtype=torch.int32)
 
     # ``torch.sort`` returns values and indices in one operation and preserves
     # the route order used by the previous argsort + gather implementation.
     sorted_experts, order = torch.sort(ids)
     counts = torch.zeros(num_experts, device=ids.device, dtype=torch.int32)
     if route_count:
-        counts.scatter_add_(
-            0, ids, torch.ones_like(ids, dtype=torch.int32)
-        )
+        counts.scatter_add_(0, ids, torch.ones_like(ids, dtype=torch.int32))
     padded_counts = ((counts + block_size - 1) // block_size) * block_size
     starts = torch.cumsum(padded_counts, 0) - padded_counts
     ends = torch.cumsum(counts, 0)
@@ -81,12 +77,8 @@ def _magi2_align_block_size_fixed_capacity(
     block_counts = padded_counts // block_size
     cumulative_blocks = torch.cumsum(block_counts, 0)
     block_indices = torch.arange(max_blocks, device=ids.device, dtype=torch.int32)
-    mapped_experts = torch.searchsorted(
-        cumulative_blocks, block_indices, right=True
-    ).to(torch.int32)
-    expert_ids = torch.where(
-        block_indices < cumulative_blocks[-1], mapped_experts, -1
-    ).to(torch.int32)
+    mapped_experts = torch.searchsorted(cumulative_blocks, block_indices, right=True).to(torch.int32)
+    expert_ids = torch.where(block_indices < cumulative_blocks[-1], mapped_experts, -1).to(torch.int32)
     num_padded = padded_counts.sum(dtype=torch.int32).reshape(1)
     return sorted_ids, expert_ids, num_padded
 
@@ -112,9 +104,7 @@ def _magi2_align_block_size(
     # can still force it on another backend for diagnostics.
     musa_device = ids.device.type in {"musa", "privateuseone"}
     if force_fixed_capacity:
-        return _magi2_align_block_size_fixed_capacity(
-            ids, num_experts, block_size
-        )
+        return _magi2_align_block_size_fixed_capacity(ids, num_experts, block_size)
 
     global _MAGI2_ALIGN_OP_AVAILABLE
     if not force_dynamic_fallback and _MAGI2_ALIGN_OP_AVAILABLE is not False:
@@ -122,12 +112,8 @@ def _magi2_align_block_size(
             from vllm._custom_ops import moe_align_block_size
 
             capacity = ids.numel() + num_experts * block_size
-            sorted_ids = torch.empty(
-                (capacity,), device=ids.device, dtype=torch.int32
-            )
-            expert_ids = torch.empty(
-                (capacity // block_size,), device=ids.device, dtype=torch.int32
-            )
+            sorted_ids = torch.empty((capacity,), device=ids.device, dtype=torch.int32)
+            expert_ids = torch.empty((capacity // block_size,), device=ids.device, dtype=torch.int32)
             num_padded = torch.empty((1,), device=ids.device, dtype=torch.int32)
             moe_align_block_size(
                 ids,
@@ -151,9 +137,7 @@ def _magi2_align_block_size(
         # ``_moe_C`` implementation. Prefer the device-count/capacity path by
         # default; setting ``MAGI2_MOE_ALIGN_FIXED_CAPACITY=0`` retains the
         # original dynamic fallback as an emergency rollback.
-        return _magi2_align_block_size_fixed_capacity(
-            ids, num_experts, block_size
-        )
+        return _magi2_align_block_size_fixed_capacity(ids, num_experts, block_size)
 
     # MUSA builds may expose the Python wrapper without the CUDA `_moe_C`
     # extension.  This implementation intentionally stays on-device.
@@ -162,9 +146,7 @@ def _magi2_align_block_size(
     counts = torch.bincount(ids, minlength=num_experts)
     padded_counts = ((counts + block_size - 1) // block_size) * block_size
     total = int(padded_counts.sum().item())
-    sorted_ids = torch.full(
-        (total,), ids.numel(), device=ids.device, dtype=torch.int32
-    )
+    sorted_ids = torch.full((total,), ids.numel(), device=ids.device, dtype=torch.int32)
     starts = torch.cumsum(padded_counts, 0) - padded_counts
     ends = torch.cumsum(counts, 0)
     begins = ends - counts
@@ -186,9 +168,7 @@ def _magi2_align_block_size(
 def _magi2_sgl_fused_moe_module():
     global _SGL_FUSED_MOE_MODULE
     if _SGL_FUSED_MOE_MODULE is None:
-        _SGL_FUSED_MOE_MODULE = importlib.import_module(
-            "vllm_omni.diffusion.models.magi2.sgl_fused_moe_kernels"
-        )
+        _SGL_FUSED_MOE_MODULE = importlib.import_module("vllm_omni.diffusion.models.magi2.sgl_fused_moe_kernels")
     return _SGL_FUSED_MOE_MODULE
 
 
@@ -201,6 +181,7 @@ def _magi2_sgl_fused_moe_forward(
     w_down: torch.Tensor,
     packed_w13: torch.Tensor | None = None,
     packed_w2: torch.Tensor | None = None,
+    use_deepgemm_w13: bool = False,
 ) -> torch.Tensor:
     """SGLang-compatible fused SwiGLU MoE for MAGI-2's head-routed layout."""
     if x_heads.ndim != 3 or probabilities.ndim != 3 or indices.ndim != 3:
@@ -214,12 +195,8 @@ def _magi2_sgl_fused_moe_forward(
     num_experts = w_gate.shape[0]
     # The generic fused kernel consumes one row per (head, token), with expert
     # IDs offset into the flattened head-local expert table.
-    hidden = x_heads.permute(1, 0, 2).contiguous().reshape(
-        num_heads * num_tokens, hidden_size
-    )
-    route_weights = probabilities.permute(0, 1, 2).contiguous().reshape(
-        num_heads * num_tokens, top_k
-    )
+    hidden = x_heads.permute(1, 0, 2).contiguous().reshape(num_heads * num_tokens, hidden_size)
+    route_weights = probabilities.permute(0, 1, 2).contiguous().reshape(num_heads * num_tokens, top_k)
     route_ids = indices.to(torch.int32).contiguous()
     route_ids = (
         route_ids
@@ -227,9 +204,7 @@ def _magi2_sgl_fused_moe_forward(
         .view(num_heads, 1, 1)
         .mul(num_experts_per_head)
     ).reshape(num_heads * num_tokens, top_k)
-    sorted_ids, expert_ids, num_padded = _magi2_align_block_size(
-        route_ids, num_experts, 128
-    )
+    sorted_ids, expert_ids, num_padded = _magi2_align_block_size(route_ids, num_experts, 128)
 
     # W13 is packed only into one per-process scratch buffer.  Keeping this
     # buffer out of each layer avoids a resident ~1 GB duplicate for all 36
@@ -289,40 +264,56 @@ def _magi2_sgl_fused_moe_forward(
     # Include padding when retaining expert-sorted rows between W13 and W2.
     # Filtered-expert rows remain zero.
     intermediate_rows = sorted_ids.numel() if sorted_intermediate else route_ids.numel()
-    intermediate = torch.zeros(
-        (intermediate_rows, intermediate_size),
-        device=x_heads.device,
-        dtype=x_heads.dtype,
-    )
-    kernels.invoke_fused_moe_kernel(
-        hidden,
-        packed,
-        None,
-        intermediate,
-        None,
-        None,
-        None,
-        route_weights,
-        route_ids,
-        sorted_ids,
-        expert_ids,
-        num_padded,
-        False,
-        top_k,
-        config,
-        tl.bfloat16,
-        False,
-        False,
-        False,
-        False,
-        False,
-        no_combine=True,
-        c_sorted=sorted_intermediate,
-        filter_expert=True,
-        fuse_swiglu=True,
-        swiglu_alpha=1.702,
-        swiglu_limit=7.0,
-    )
+    if use_deepgemm_w13:
+        if not sorted_intermediate:
+            raise ValueError("DeepGEMM W13 requires owned W13 and sorted intermediate")
+        from .deepgemm_moe import sorted_w13
+
+        intermediate = sorted_w13(
+            hidden,
+            packed,
+            sorted_ids,
+            expert_ids,
+            num_padded,
+            top_k,
+            config["BLOCK_SIZE_M"],
+            backend=os.environ.get("MAGI2_DEEPGEMM_W13_BACKEND", "mubin"),
+        )
+    else:
+        intermediate = torch.zeros(
+            (intermediate_rows, intermediate_size),
+            device=x_heads.device,
+            dtype=x_heads.dtype,
+        )
+        kernels.invoke_fused_moe_kernel(
+            hidden,
+            packed,
+            None,
+            intermediate,
+            None,
+            None,
+            None,
+            route_weights,
+            route_ids,
+            sorted_ids,
+            expert_ids,
+            num_padded,
+            False,
+            top_k,
+            config,
+            tl.bfloat16,
+            False,
+            False,
+            False,
+            False,
+            False,
+            no_combine=True,
+            c_sorted=sorted_intermediate,
+            filter_expert=True,
+            fuse_swiglu=True,
+            swiglu_alpha=1.702,
+            swiglu_limit=7.0,
+        )
     route_output = torch.zeros(
         (hidden.shape[0], top_k, hidden_size),
         device=hidden.device,
@@ -362,9 +353,7 @@ def _magi2_sgl_fused_moe_forward(
     # one custom kernel.  Use the equivalent reduction while we keep the
     # adapter self-contained; this is a single device reduction and leaves a
     # clean seam for replacing it with the AOT op when available in the image.
-    output = torch.empty(
-        (hidden.shape[0], hidden_size), device=hidden.device, dtype=hidden.dtype
-    )
+    output = torch.empty((hidden.shape[0], hidden_size), device=hidden.device, dtype=hidden.dtype)
     used_fast_sum = False
     if os.environ.get("MAGI2_USE_MUSA_MOE_SUM", "1") == "1":
         try:
@@ -471,9 +460,7 @@ def global_sort_routes(
     the source head for every sorted route.
     """
 
-    gather_ids, sorted_probs, offsets, _, _ = _global_sort_routes_impl(
-        topk_probs, topk_indices, num_experts
-    )
+    gather_ids, sorted_probs, offsets, _, _ = _global_sort_routes_impl(topk_probs, topk_indices, num_experts)
     return gather_ids, sorted_probs, offsets
 
 
@@ -491,9 +478,7 @@ def global_sort_routes_with_head_ids(
     ``repeat_interleave``-ing it to route length on every layer.
     """
 
-    gather_ids, sorted_probs, offsets, order, _ = _global_sort_routes_impl(
-        topk_probs, topk_indices, num_experts
-    )
+    gather_ids, sorted_probs, offsets, order, _ = _global_sort_routes_impl(topk_probs, topk_indices, num_experts)
     _, sequence, top_k = topk_indices.shape
     if order.numel() == 0:
         sorted_head_ids = order
@@ -515,9 +500,7 @@ def global_sort_routes_with_head_ids_and_counts(
     adapter while keeping the legacy three-/four-tensor APIs unchanged.
     """
 
-    gather_ids, sorted_probs, offsets, order, counts = _global_sort_routes_impl(
-        topk_probs, topk_indices, num_experts
-    )
+    gather_ids, sorted_probs, offsets, order, counts = _global_sort_routes_impl(topk_probs, topk_indices, num_experts)
     _, sequence, top_k = topk_indices.shape
     if order.numel() == 0:
         sorted_head_ids = order
@@ -579,19 +562,13 @@ def _mate_bf16_grouped_linear(
 
     if major_b_mode != "N":
         raise ValueError("MAGI grouped BF16 weights must use MATE major_b_mode='N'")
-    if (
-        not input_a.is_contiguous()
-        or not weight.is_contiguous()
-        or not token_counts.is_contiguous()
-    ):
+    if not input_a.is_contiguous() or not weight.is_contiguous() or not token_counts.is_contiguous():
         raise ValueError("MATE grouped BF16 operands must be contiguous")
     # MAGI checkpoint tensors are all stored as ``[K, N]`` per expert.  The
     # MATE ``N`` major mode describes this physical layout and exposes the
     # trailing dimension as the output width.
     out_features = weight.shape[-1]
-    output = torch.empty(
-        (input_a.shape[0], out_features), device=input_a.device, dtype=input_a.dtype
-    )
+    output = torch.empty((input_a.shape[0], out_features), device=input_a.device, dtype=input_a.dtype)
     from mate.gemm import ragged_m_moe_gemm_16bit
 
     ragged_m_moe_gemm_16bit(
@@ -634,9 +611,7 @@ def mate_bf16_mh_moe_forward(
 
     if x.ndim != 3:
         raise ValueError("multi-head MoE input must be [tokens,heads,head_dim]")
-    if x.dtype != torch.bfloat16 or any(
-        weight.dtype != torch.bfloat16 for weight in (w_gate, w_up, w_down)
-    ):
+    if x.dtype != torch.bfloat16 or any(weight.dtype != torch.bfloat16 for weight in (w_gate, w_up, w_down)):
         raise ValueError("MATE BF16 grouped MoE requires BF16 activations and weights")
     num_flat_experts = expert_offsets.numel() - 1
     if num_flat_experts <= 0 or num_flat_experts % x.shape[1]:
@@ -656,9 +631,7 @@ def mate_bf16_mh_moe_forward(
     token_ids = gather_ids.to(dtype=torch.long)
     if sorted_head_ids is None:
         experts_per_head = num_flat_experts // x.shape[1]
-        head_for_expert = torch.arange(
-            num_flat_experts, device=x.device, dtype=torch.long
-        ) // experts_per_head
+        head_for_expert = torch.arange(num_flat_experts, device=x.device, dtype=torch.long) // experts_per_head
         head_ids = torch.repeat_interleave(head_for_expert, token_counts.to(torch.long))
     else:
         if sorted_head_ids.ndim != 1 or sorted_head_ids.numel() != token_ids.numel():
@@ -1136,6 +1109,9 @@ class Magi2MultiHeadMoE(nn.Module):
             and x_heads.dtype == torch.bfloat16
             and os.environ.get("MAGI2_DETERMINISTIC", "0") != "1"
         )
+        use_deepgemm_w13 = os.environ.get("MAGI2_USE_DEEPGEMM_W13", "0") == "1"
+        if use_deepgemm_w13 and not use_sgl_fused:
+            raise ValueError("DeepGEMM W13 requires the BF16 MUSA fused-MoE path")
         if use_sgl_fused:
             try:
                 packed_w13 = None
@@ -1159,11 +1135,13 @@ class Magi2MultiHeadMoE(nn.Module):
                     self.W_down,
                     packed_w13=packed_w13,
                     packed_w2=packed_w2,
+                    use_deepgemm_w13=use_deepgemm_w13,
                 )
             except Exception as exc:
+                if use_deepgemm_w13:
+                    raise RuntimeError("Explicitly requested DeepGEMM W13 path failed") from exc
                 logger.warning(
-                    "SGLang-compatible fused MAGI-2 MoE path failed; "
-                    "falling back to the configured route: %s",
+                    "SGLang-compatible fused MAGI-2 MoE path failed; falling back to the configured route: %s",
                     exc,
                 )
         use_mate = (
@@ -1180,19 +1158,14 @@ class Magi2MultiHeadMoE(nn.Module):
                 offsets,
                 sorted_head_ids,
                 route_counts,
-            ) = global_sort_routes_with_head_ids_and_counts(
-                probabilities, indices, self.num_experts
-            )
+            ) = global_sort_routes_with_head_ids_and_counts(probabilities, indices, self.num_experts)
         else:
-            gather_ids, sorted_probs, offsets = global_sort_routes(
-                probabilities, indices, self.num_experts
-            )
+            gather_ids, sorted_probs, offsets = global_sort_routes(probabilities, indices, self.num_experts)
         if use_mate:
             backend = (os.environ.get("MAGI2_MATE_MOE_BACKEND") or "mubin").strip().lower()
             if backend not in {"auto", "mubin"}:
                 raise ValueError(
-                    "MAGI2_MATE_MOE_BACKEND must be auto or mubin; "
-                    "mutlass does not accept per-expert count metadata"
+                    "MAGI2_MATE_MOE_BACKEND must be auto or mubin; mutlass does not accept per-expert count metadata"
                 )
             if backend == "auto":
                 # ``auto`` currently resolves to Mubin for this API. Keep the
@@ -1215,8 +1188,7 @@ class Magi2MultiHeadMoE(nn.Module):
             except Exception as exc:
                 if not _MATE_MOE_WARNED:
                     logger.warning(
-                        "MATE BF16 grouped MAGI-2 MoE path failed; falling back "
-                        "to the Torch route: %s",
+                        "MATE BF16 grouped MAGI-2 MoE path failed; falling back to the Torch route: %s",
                         exc,
                     )
                     _MATE_MOE_WARNED = True
@@ -1289,9 +1261,7 @@ class Magi2MultiHeadMoE(nn.Module):
                 or any(size < 0 for size in resolved_split_sizes)
                 or resolved_split_sizes[self.ep_group.rank] != x_heads.shape[0]
             ):
-                raise ValueError(
-                    "sequence_split_sizes must match the MoE group's local sequence shard"
-                )
+                raise ValueError("sequence_split_sizes must match the MoE group's local sequence shard")
             x_heads = ep_dispatch(x_heads, self.ep_group, resolved_split_sizes)
         output = self._local_forward(x_heads) if self.has_real_moe_heads else torch.zeros_like(x_heads)
         if self.ep_group.world_size > 1:
