@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 import functools
 import json
 import os
@@ -7,8 +10,8 @@ from collections.abc import Callable
 from threading import Lock
 from typing import Any
 
+import torch
 import torch.distributed as dist
-
 from vllm.logger import init_logger
 
 from vllm_omni.platforms import current_omni_platform
@@ -24,6 +27,16 @@ def profiler(name: str, func: Callable, instance: Any) -> Callable:
     @functools.wraps(func)
     def wrapper(*args, **kwargs) -> Any:
         nonlocal step_index
+        if os.environ.get("MAGI2_BENCH_GRAPH_REPLAYS", "0") == "1" and not hasattr(torch.musa, "_magi2_replay_count"):
+            torch.musa._magi2_replay_count = 0
+            original_replay = torch.musa.MUSAGraph.replay
+
+            @functools.wraps(original_replay)
+            def counted_replay(*a, **kw):
+                torch.musa._magi2_replay_count += 1
+                return original_replay(*a, **kw)
+
+            torch.musa.MUSAGraph.replay = counted_replay
         if name == f"{instance.__class__.__name__}.forward":
             instance.clear_profiler_records()
         if current_omni_platform.is_available():
@@ -40,6 +53,8 @@ def profiler(name: str, func: Callable, instance: Any) -> Callable:
                 rank = dist.get_rank() if dist.is_initialized() else 0
                 os.makedirs(metrics_dir, exist_ok=True)
                 record = {"rank": rank, "step": step_index, "seconds": duration, "timer": metric_name}
+                if os.environ.get("MAGI2_BENCH_GRAPH_REPLAYS", "0") == "1":
+                    record["graph_replays_total"] = torch.musa._magi2_replay_count
                 with open(os.path.join(metrics_dir, f"rank-{rank}.jsonl"), "a") as stream:
                     stream.write(json.dumps(record) + "\n")
                 step_index += 1
@@ -68,7 +83,7 @@ def _get_attribute_by_path(obj: Any, path: str) -> tuple[Any, str]:
 
         current = getattr(current, attr, None)
         if current is None:
-            return None, None
+            return None, parts[-1]
         if idx is not None:
             current = current[idx]
 

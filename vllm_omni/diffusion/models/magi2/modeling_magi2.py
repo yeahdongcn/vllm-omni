@@ -380,9 +380,7 @@ class Magi2PreAdapter(nn.Module):
         # explicit ``device=packed.device`` form is valid eager Python but is
         # emitted as an unbound ``device(...)`` symbol by the pinned MUSA
         # torch.compile backend.
-        output = packed.new_empty(
-            (packed.shape[0], self.adapter_dim), dtype=self.config.params_dtype
-        )
+        output = packed.new_empty((packed.shape[0], self.adapter_dim), dtype=self.config.params_dtype)
         for indices, embedder, in_channels in (
             (text_indices, self.text_embedder, self.config.text_in_channels),
             (audio_indices, self.audio_embedder, self.config.audio_in_channels),
@@ -421,9 +419,7 @@ class Magi2PostAdapter(nn.Module):
         video_indices: torch.Tensor,
         audio_indices: torch.Tensor,
     ) -> torch.Tensor:
-        output = hidden_states.new_zeros(
-            (hidden_states.shape[0], self.final_out_dim), dtype=torch.float32
-        )
+        output = hidden_states.new_zeros((hidden_states.shape[0], self.final_out_dim), dtype=torch.float32)
         if video_indices.numel():
             video = self.final_norm_video(hidden_states.index_select(0, video_indices).float())
             video = self.final_linear_video(video).float()
@@ -736,6 +732,12 @@ class Magi2PreviewTransformer(nn.Module):
 
             requested_limit = int(os.environ.get("MAGI2_COMPILE_RECOMPILE_LIMIT", "64"))
             _dynamo_config.recompile_limit = max(_dynamo_config.recompile_limit, requested_limit)
+            if os.environ.get("MAGI2_MUSA_REGION_GRAPHS", "0") == "1":
+                compile_kwargs = dict(compile_kwargs)
+                compile_kwargs["options"] = {
+                    **(compile_kwargs.get("options") or {}),
+                    "triton.cudagraphs": True,
+                }
 
         self.pre_adapter.forward = torch.compile(self.pre_adapter.forward, **compile_kwargs)
         self.post_adapter.forward = torch.compile(self.post_adapter.forward, **compile_kwargs)
@@ -767,7 +769,7 @@ class Magi2PreviewTransformer(nn.Module):
         video_indices = torch.nonzero(modality_mapping == int(Modality.VIDEO)).flatten()
         audio_indices = torch.nonzero(modality_mapping == int(Modality.AUDIO)).flatten()
         text_indices = torch.nonzero(modality_mapping == int(Modality.TEXT)).flatten()
-        time_indices = torch.nonzero(time_mask).flatten()
+        _time_indices = torch.nonzero(time_mask).flatten()
 
         hidden_states = self.pre_adapter(x, video_indices, audio_indices, text_indices)
         if time_token_sequence is not None and time_token_sequence.shape[-1] > 0:

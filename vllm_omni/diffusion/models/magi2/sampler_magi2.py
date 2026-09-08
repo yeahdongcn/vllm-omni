@@ -13,6 +13,7 @@ while this sampler only prepares tensors and invokes the already placed model.
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -167,6 +168,10 @@ class Magi2PreviewSampler(CFGParallelMixin):
         profiler a real per-step boundary.  The returned tensors are the next
         scheduler states, and no model placement is changed here.
         """
+        if os.environ.get("MAGI2_MUSA_REGION_GRAPHS", "0") == "1" and latent.device.type == "musa":
+            from torch_musa._inductor import musagraph_trees
+
+            musagraph_trees.mark_step_begin()
         model_input = self.prepare_model_input(
             latent=latent,
             audio_latent=audio_latent,
