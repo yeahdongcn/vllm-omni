@@ -1,9 +1,13 @@
 import functools
+import json
+import os
 import re
 import time
 from collections.abc import Callable
 from threading import Lock
 from typing import Any
+
+import torch.distributed as dist
 
 from vllm.logger import init_logger
 
@@ -15,9 +19,11 @@ logger = init_logger(__name__)
 def profiler(name: str, func: Callable, instance: Any) -> Callable:
     """Timing a function execution."""
     metric_name = f"{name.rsplit('.', 1)[0]}.diffuse" if name.endswith(".denoise_step") else name
+    step_index = 0
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs) -> Any:
+        nonlocal step_index
         if name == f"{instance.__class__.__name__}.forward":
             instance.clear_profiler_records()
         if current_omni_platform.is_available():
@@ -29,6 +35,14 @@ def profiler(name: str, func: Callable, instance: Any) -> Callable:
             if current_omni_platform.is_available():
                 current_omni_platform.synchronize()
             duration = time.perf_counter() - start_time
+            metrics_dir = os.environ.get("MAGI2_BENCH_STEP_METRICS_DIR")
+            if metrics_dir and name.endswith(".denoise_step"):
+                rank = dist.get_rank() if dist.is_initialized() else 0
+                os.makedirs(metrics_dir, exist_ok=True)
+                record = {"rank": rank, "step": step_index, "seconds": duration, "timer": metric_name}
+                with open(os.path.join(metrics_dir, f"rank-{rank}.jsonl"), "a") as stream:
+                    stream.write(json.dumps(record) + "\n")
+                step_index += 1
             logger.info(f"[DiffusionPipelineProfiler] {metric_name} took {duration:.6f}s")
             # record the profiling data: duration of stages
             with instance._profiler_lock:
