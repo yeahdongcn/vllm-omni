@@ -265,7 +265,7 @@ def _magi2_sgl_fused_moe_forward(
         raise ValueError("invalid MAGI2 SGL tile config")
     num_warps = int(os.environ.get("MAGI2_SGL_NUM_WARPS", "16"))
     num_stages = int(os.environ.get("MAGI2_SGL_NUM_STAGES", "1"))
-    group_m = int(os.environ.get("MAGI2_SGL_GROUP_M", "16"))
+    group_m = int(os.environ.get("MAGI2_SGL_GROUP_M", "8"))
     down_group_m = int(os.environ.get("MAGI2_SGL_DOWN_GROUP_M", str(group_m)))
     if group_m not in (1, 2, 4, 8, 16, 32) or down_group_m not in (1, 2, 4, 8, 16, 32):
         raise ValueError("invalid MAGI2 SGL group-M config")
