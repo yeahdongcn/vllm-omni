@@ -265,17 +265,22 @@ def _magi2_sgl_fused_moe_forward(
         raise ValueError("invalid MAGI2 SGL tile config")
     num_warps = int(os.environ.get("MAGI2_SGL_NUM_WARPS", "16"))
     num_stages = int(os.environ.get("MAGI2_SGL_NUM_STAGES", "1"))
+    group_m = int(os.environ.get("MAGI2_SGL_GROUP_M", "16"))
+    down_group_m = int(os.environ.get("MAGI2_SGL_DOWN_GROUP_M", str(group_m)))
+    if group_m not in (1, 2, 4, 8, 16, 32) or down_group_m not in (1, 2, 4, 8, 16, 32):
+        raise ValueError("invalid MAGI2 SGL group-M config")
     if num_warps not in (4, 8, 16, 32) or num_stages not in (1, 2, 3, 4):
         raise ValueError("invalid MAGI2 SGL launch config")
     config = {
         "BLOCK_SIZE_M": 128,
         "BLOCK_SIZE_N": block_n,
         "BLOCK_SIZE_K": block_k,
-        "GROUP_SIZE_M": 16,
+        "GROUP_SIZE_M": group_m,
         "num_warps": num_warps,
         "num_stages": num_stages,
     }
     config_down = dict(config)
+    config_down["GROUP_SIZE_M"] = down_group_m
     if packed_w13 is not None and os.environ.get("MAGI2_SGL_BLOCK_K") is None:
         config_down["BLOCK_SIZE_K"] = 64
     sorted_intermediate = (
