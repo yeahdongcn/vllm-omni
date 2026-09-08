@@ -29,11 +29,19 @@ def profiler(name: str, func: Callable, instance: Any) -> Callable:
         nonlocal step_index
         if os.environ.get("MAGI2_BENCH_GRAPH_REPLAYS", "0") == "1" and not hasattr(torch.musa, "_magi2_replay_count"):
             torch.musa._magi2_replay_count = 0
+            torch.musa._magi2_replay_host_seconds = 0.0
+            track_host_time = os.environ.get("MAGI2_BENCH_GRAPH_HOST_TIME", "0") == "1"
             original_replay = torch.musa.MUSAGraph.replay
 
             @functools.wraps(original_replay)
             def counted_replay(*a, **kw):
                 torch.musa._magi2_replay_count += 1
+                if track_host_time:
+                    replay_start = time.perf_counter()
+                    try:
+                        return original_replay(*a, **kw)
+                    finally:
+                        torch.musa._magi2_replay_host_seconds += time.perf_counter() - replay_start
                 return original_replay(*a, **kw)
 
             torch.musa.MUSAGraph.replay = counted_replay
@@ -55,6 +63,8 @@ def profiler(name: str, func: Callable, instance: Any) -> Callable:
                 record = {"rank": rank, "step": step_index, "seconds": duration, "timer": metric_name}
                 if os.environ.get("MAGI2_BENCH_GRAPH_REPLAYS", "0") == "1":
                     record["graph_replays_total"] = torch.musa._magi2_replay_count
+                    if os.environ.get("MAGI2_BENCH_GRAPH_HOST_TIME", "0") == "1":
+                        record["graph_replay_host_seconds_total"] = torch.musa._magi2_replay_host_seconds
                 with open(os.path.join(metrics_dir, f"rank-{rank}.jsonl"), "a") as stream:
                     stream.write(json.dumps(record) + "\n")
                 step_index += 1
