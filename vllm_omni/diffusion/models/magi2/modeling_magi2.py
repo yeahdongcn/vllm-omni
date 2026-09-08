@@ -732,6 +732,10 @@ class Magi2PreviewTransformer(nn.Module):
 
             requested_limit = int(os.environ.get("MAGI2_COMPILE_RECOMPILE_LIMIT", "64"))
             _dynamo_config.recompile_limit = max(_dynamo_config.recompile_limit, requested_limit)
+            if os.environ.get("MAGI2_COMPILE_SPECIALIZE_FLOAT", "0") == "1":
+                # MHC's fixed matmul_scale otherwise becomes a CPU float64
+                # tensor input, with a pinned-host copy into a GPU region.
+                _dynamo_config.specialize_float = True
             if (
                 os.environ.get("MAGI2_MUSA_REGION_GRAPHS", "0") == "1"
                 or os.environ.get("MAGI2_MUSA_FULL_TORCH_CPP", "0") == "1"
