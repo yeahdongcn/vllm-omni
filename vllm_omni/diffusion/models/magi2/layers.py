@@ -302,9 +302,7 @@ class MultiModalityRMSNorm(nn.Module):
             and tensor.device.type in {"musa", "privateuseone"}
         )
         if fast_rms:
-            compute_dtype = (
-                torch.float32 if target_dtype == torch.float32 else tensor.dtype
-            )
+            compute_dtype = torch.float32 if target_dtype == torch.float32 else tensor.dtype
             normalized_input = tensor.to(compute_dtype)
             if self.num_modality == 1:
                 normalized = F.rms_norm(
@@ -313,9 +311,7 @@ class MultiModalityRMSNorm(nn.Module):
                     None,
                     self.eps,
                 )
-                weight = (
-                    self.weight.view(self.num_patterns, self.dim) + 1.0
-                ).to(compute_dtype)
+                weight = (self.weight.view(self.num_patterns, self.dim) + 1.0).to(compute_dtype)
                 return (normalized * weight).to(target_dtype)
             if modality_dispatcher is None:
                 raise ValueError("modality_dispatcher is required for multimodal RMSNorm")
@@ -325,13 +321,9 @@ class MultiModalityRMSNorm(nn.Module):
                 None,
                 self.eps,
             )
-            weights = (
-                self.weight.view(self.num_modality, self.num_patterns, self.dim) + 1.0
-            ).to(compute_dtype)
+            weights = (self.weight.view(self.num_modality, self.num_patterns, self.dim) + 1.0).to(compute_dtype)
             inputs = modality_dispatcher.dispatch(normalized)
-            result = modality_dispatcher.undispatch(
-                *(part * weights[index] for index, part in enumerate(inputs))
-            )
+            result = modality_dispatcher.undispatch(*(part * weights[index] for index, part in enumerate(inputs)))
             return result.to(target_dtype)
 
         normalized = tensor.float()
@@ -463,17 +455,13 @@ class MHCHandler:
 
     def _bf16_phi(self, phi_fused: torch.Tensor) -> torch.Tensor:
         """Cache the tiny BF16 projection matrix without changing state dicts."""
-        # Regional compiled MAGI-2 regions cannot trace ``data_ptr`` or the
-        # Python tuple comparison used by the eager cache below.  The
-        # parameter is immutable during inference, so keep one compile-safe
-        # tensor per handler and retain the version/device-aware path for
-        # eager execution and checkpoint reloads.
+        # One handler serves different attention/MoE projection matrices.
+        # Do not cache a compiled result on it: that both reuses the wrong
+        # matrix and lets a graph-owned allocation escape its lifetime.
+        # Keep conversion inside the compiled graph, and retain the
+        # version/device-aware cache for eager execution below.
         if torch.compiler.is_compiling():
-            compiled_value = getattr(self, "_compiled_phi_fused_bf16", None)
-            if compiled_value is None:
-                compiled_value = phi_fused.detach().to(dtype=torch.bfloat16).contiguous()
-                self._compiled_phi_fused_bf16 = compiled_value
-            return compiled_value
+            return phi_fused.detach().to(dtype=torch.bfloat16).contiguous()
         key = id(phi_fused)
         source = self._parameter_source(phi_fused)
         cached = self._phi_fused_bf16.get(key)
@@ -511,10 +499,7 @@ class MHCHandler:
             and phi_fused.dtype == torch.float32
         )
         if use_bf16:
-            fused = (
-                normalized.to(dtype=torch.bfloat16)
-                @ self._bf16_phi(phi_fused)
-            ).float()
+            fused = (normalized.to(dtype=torch.bfloat16) @ self._bf16_phi(phi_fused)).float()
         else:
             fused = normalized.to(self.dtype) @ phi_fused
         pre, post, residual = torch.split(
@@ -613,11 +598,7 @@ class MHCHandler:
         if branch_output.ndim != 2 or branch_output.shape[-1] != self.hidden_size:
             raise ValueError("invalid mHC branch-output shape")
         fused_setting = os.environ.get("MAGI2_USE_MHC_FUSED")
-        if (
-            fused_setting != "0"
-            and residual_streams.device.type in ("musa", "privateuseone")
-            and self.num_streams == 4
-        ):
+        if fused_setting != "0" and residual_streams.device.type in ("musa", "privateuseone") and self.num_streams == 4:
             try:
                 from .mhc_kernel import mhc_mix_output
 
