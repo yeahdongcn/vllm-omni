@@ -487,12 +487,21 @@ class Magi2TransformerLayer(nn.Module):
             num_modality=num_modality,
             out_dtype=torch.float32,
         )
-        self.mhc_handler = MHCHandler(
+        self.mhc_handler_attn = MHCHandler(
             streams,
             hidden,
             sinkhorn_iterations=self.config.mhc.sinkhorn_iterations,
             sinkhorn_epsilon=self.config.mhc.sinkhorn_epsilon,
         )
+        self.mhc_handler_mlp = MHCHandler(
+            streams,
+            hidden,
+            sinkhorn_iterations=self.config.mhc.sinkhorn_iterations,
+            sinkhorn_epsilon=self.config.mhc.sinkhorn_epsilon,
+        )
+
+    def _mhc_handler(self, branch: str) -> MHCHandler:
+        return self.mhc_handler_attn if branch == "attn" else self.mhc_handler_mlp
 
     def _branch_logits(
         self,
@@ -509,8 +518,9 @@ class Magi2TransformerLayer(nn.Module):
             and streams.shape[1] == self.config.mhc.num_streams == 4
         ):
             norm_dtype = torch.bfloat16
-        return self.mhc_handler.compute_logits(
-            self.mhc_handler.flatten(streams),
+        handler = self._mhc_handler(branch)
+        return handler.compute_logits(
+            handler.flatten(streams),
             partial(
                 self.mhc_norm,
                 modality_dispatcher=dispatcher,
@@ -526,7 +536,7 @@ class Magi2TransformerLayer(nn.Module):
         logits: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
         pre_logits, _, _ = logits
-        return self.mhc_handler.apply_pre(
+        return self._mhc_handler(branch).apply_pre(
             streams,
             (
                 getattr(self, f"mhc_alpha_pre_{branch}"),
@@ -544,7 +554,7 @@ class Magi2TransformerLayer(nn.Module):
         logits: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
         _, post_logits, residual_logits = logits
-        post, residual = self.mhc_handler.compute_post_residual(
+        post, residual = self._mhc_handler(branch).compute_post_residual(
             (
                 getattr(self, f"mhc_alpha_post_{branch}"),
                 getattr(self, f"mhc_bias_post_{branch}"),
@@ -557,7 +567,7 @@ class Magi2TransformerLayer(nn.Module):
             ),
             out_dtype=streams.dtype,
         )
-        return self.mhc_handler.hyper_connect(streams, output, post, residual)
+        return self._mhc_handler(branch).hyper_connect(streams, output, post, residual)
 
     # The layer forward is split into compile regions around the two eager
     # kernels: packed attention and the multi-head MoE.
