@@ -487,6 +487,11 @@ class MHCHandler:
             return value
         return cached[1]
 
+    def invalidate_compiled_cache(self) -> None:
+        """Invalidate the region-local BF16 projection after weight loading."""
+        if hasattr(self, "_compiled_phi_fused_bf16"):
+            self._compiled_phi_fused_bf16 = None
+
     def flatten(self, tensor: torch.Tensor) -> torch.Tensor:
         self._check_multi(tensor)
         return tensor.view(tensor.shape[0], -1)
