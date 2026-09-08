@@ -34,7 +34,12 @@ from .layers import (
     swiglu7,
 )
 from .mh_moe import Magi2MultiHeadMoE, Magi2MultiHeadMoEConfig
-from .parallel import Magi2SequenceDispatcher
+from .parallel import (
+    Magi2SequenceDispatcher,
+    get_magi2_ep_split_indices,
+    get_magi2_expert_parallel_config,
+    get_magi2_ulysses_group,
+)
 
 
 class Modality(IntEnum):
@@ -210,7 +215,12 @@ class Magi2MLP(nn.Module):
             parallel_mode="row",
         )
 
-    def forward(self, hidden_states: torch.Tensor, dispatcher: ModalityDispatcher) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        dispatcher: ModalityDispatcher,
+        cp_split_sizes: list[int] | torch.Tensor | None = None,
+    ) -> torch.Tensor:
         hidden_states = self.pre_norm(hidden_states, dispatcher)
         hidden_states = self.up_gate_proj(hidden_states, dispatcher)
         hidden_states = swiglu7(hidden_states)
@@ -243,6 +253,15 @@ class Magi2MultiHeadMoELayer(nn.Module):
                 route_scale=moe.routing_scale,
             )
         )
+        self._ep_split_indices: tuple[int, ...] | None = None
+        self._sp_world_size = 1
+        parallel = get_magi2_expert_parallel_config()
+        if parallel is not None:
+            sp_group = get_magi2_ulysses_group()
+            if sp_group.world_size != parallel.sequence_parallel_size:
+                raise RuntimeError("MAGI-2 head-EP requires the configured SP group before model construction")
+            self._sp_world_size = sp_group.world_size
+            self._ep_split_indices = get_magi2_ep_split_indices(self.moe_mlp.ep_group, sp_group)
         self.merge_linear = make_grouped_linear(
             config.hidden_size,
             config.hidden_size,
@@ -303,10 +322,22 @@ class Magi2MultiHeadMoELayer(nn.Module):
             modality.contiguous(), dispatcher
         )
 
-    def forward(self, hidden_states: torch.Tensor, dispatcher: ModalityDispatcher) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        dispatcher: ModalityDispatcher,
+        cp_split_sizes: list[int] | torch.Tensor | None = None,
+    ) -> torch.Tensor:
         normalized = self.pre_norm(hidden_states, dispatcher)
         routed = self.split_linear(normalized)
-        routed = self.moe_mlp(routed)
+        ep_split_sizes = None
+        # Project host split lists; tensor/absent metadata keeps the existing
+        # dynamic count-discovery path.
+        if self._ep_split_indices is not None and isinstance(cp_split_sizes, list):
+            if len(cp_split_sizes) != self._sp_world_size:
+                raise ValueError("MAGI-2 token counts must be in SP group rank order")
+            ep_split_sizes = [cp_split_sizes[index] for index in self._ep_split_indices]
+        routed = self.moe_mlp(routed, sequence_split_sizes=ep_split_sizes)
         routed = self.merge_linear(routed)
         return routed + self._shared_experts(normalized, dispatcher)
 
@@ -546,7 +577,7 @@ class Magi2TransformerLayer(nn.Module):
         streams = self._connect(streams, attention_output, "attn", attention_logits)
         mlp_logits = self._branch_logits(streams, "mlp", modality_dispatcher)
         mlp_input = self._branch_input(streams, "mlp", mlp_logits)
-        mlp_output = self.mlp(mlp_input, modality_dispatcher)
+        mlp_output = self.mlp(mlp_input, modality_dispatcher, cp_split_sizes)
         streams = self._connect(streams, mlp_output, "mlp", mlp_logits)
         return streams.reshape(streams.shape[0], -1)
 

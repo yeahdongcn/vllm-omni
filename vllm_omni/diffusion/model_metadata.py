@@ -70,6 +70,7 @@ _DIFFUSION_MODEL_METADATA: dict[str, DiffusionModelMetadata] = {
         supports_multimodal_inputs=True,
         max_multimodal_image_inputs=1,
         final_output_type="video",
+        expert_parallel_style="head",
     ),
     "WanPipeline": DiffusionModelMetadata(
         attention_mask_free=True,

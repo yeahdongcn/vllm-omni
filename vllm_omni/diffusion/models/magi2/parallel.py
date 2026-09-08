@@ -25,9 +25,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+
+if TYPE_CHECKING:
+    from vllm_omni.diffusion.data import DiffusionParallelConfig
 
 
 @dataclass(frozen=True)
@@ -72,14 +76,50 @@ def get_magi2_ulysses_group() -> Magi2ParallelGroup:
     )
 
 
+def get_magi2_expert_parallel_config() -> DiffusionParallelConfig | None:
+    from vllm_omni.diffusion.forward_context import get_forward_context
+
+    try:
+        od_config = get_forward_context().omni_diffusion_config
+    except AssertionError:
+        return None
+    if od_config is not None and getattr(od_config, "use_head_expert_parallel", False):
+        return od_config.parallel_config
+    return None
+
+
 def get_magi2_ep_group() -> Magi2ParallelGroup:
     """Return the process group used for MAGI's MoE-head parallelism.
 
-    TP is the explicit MoE-head axis when it is larger than one.  Otherwise
+    Explicit head-EP uses the framework's EP group. Without that opt-in,
+    TP is the MoE-head axis when it is larger than one. Otherwise
     the released SP-only layout overlaps head parallelism with Ulysses.  Both
     groups are initialized and owned by vLLM-Omni; MAGI creates no ad-hoc
     process groups.
     """
+
+    parallel = get_magi2_expert_parallel_config()
+    if parallel is not None:
+        validate_magi2_expert_parallel(parallel)
+        if not dist.is_available() or not dist.is_initialized():
+            raise RuntimeError("Initialize framework expert parallel groups before constructing MAGI-2")
+        from vllm.distributed.parallel_state import get_ep_group
+
+        try:
+            coordinator = get_ep_group()
+        except AssertionError as exc:
+            raise RuntimeError("MAGI-2 head-EP requires the framework expert parallel group") from exc
+        expected_size = parallel.expert_parallel_size or parallel.sequence_parallel_size
+        if coordinator.world_size != expected_size:
+            raise RuntimeError("MAGI-2 expert group size does not match the configured head-EP layout")
+        if coordinator.device_group is None:
+            raise RuntimeError("MAGI-2 head-EP requires an initialized device process group")
+        group = _dist_group_info(coordinator.device_group)
+        sp_group = get_magi2_ulysses_group()
+        if sp_group.world_size != parallel.sequence_parallel_size:
+            raise RuntimeError("MAGI-2 head-EP requires the configured SP group before model construction")
+        get_magi2_ep_split_indices(group, sp_group)
+        return group
 
     if not dist.is_available() or not dist.is_initialized():
         return Magi2ParallelGroup(None, 1, 0)
@@ -97,6 +137,33 @@ def get_magi2_ep_group() -> Magi2ParallelGroup:
         rank=coordinator.rank_in_group,
         replicated_sequence=True,
     )
+
+
+def validate_magi2_expert_parallel(parallel: DiffusionParallelConfig) -> None:
+    if parallel.enable_expert_parallel and parallel.tensor_parallel_size != 1:
+        raise ValueError("MAGI-2 head-EP currently requires tensor_parallel_size=1")
+
+
+def get_magi2_ep_split_indices(ep_group: Magi2ParallelGroup, sp_group: Magi2ParallelGroup) -> tuple[int, ...] | None:
+    """Map SP-local token counts into EP rank order without a collective.
+
+    Legacy TP replicates each SP token shard, so it does not use this mapping.
+    """
+    if ep_group.replicated_sequence:
+        return None
+
+    def members(group: Magi2ParallelGroup) -> list[int]:
+        if group.group is not None:
+            return dist.get_process_group_ranks(group.group)
+        if group.world_size != 1:
+            raise ValueError("A multi-rank MAGI-2 group requires a process group")
+        return [dist.get_rank() if dist.is_available() and dist.is_initialized() else 0]
+
+    ep_ranks, sp_ranks = members(ep_group), members(sp_group)
+    try:
+        return tuple(sp_ranks.index(rank) for rank in ep_ranks)
+    except ValueError as exc:
+        raise ValueError("MAGI-2 head-EP group must be contained in its SP group") from exc
 
 
 def get_magi2_tp_group() -> Magi2ParallelGroup:

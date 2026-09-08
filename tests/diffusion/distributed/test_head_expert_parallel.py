@@ -66,8 +66,8 @@ def test_metadata_opt_in_and_config_roundtrip(head_model):
     assert not od.is_moe  # Model capability does not require HF whole-token expert fields.
     assert DiffusionParallelConfig(**asdict(od.parallel_config)).expert_parallel_size == 2
     assert not _config(enabled=False).use_head_expert_parallel
-    od.model_class_name = "Magi2Pipeline"
-    assert not od.use_head_expert_parallel  # Model adapter is a separate opt-in.
+    od.model_class_name = "WanPipeline"
+    assert not od.use_head_expert_parallel  # Models without the capability keep their original layout.
 
 
 @pytest.mark.cpu
