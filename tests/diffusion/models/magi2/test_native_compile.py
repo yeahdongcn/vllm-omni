@@ -17,6 +17,30 @@ from vllm_omni.diffusion.models.magi2.sampler_magi2 import CFGConfig
 pytestmark = [pytest.mark.diffusion, pytest.mark.cpu, pytest.mark.core_model]
 
 
+def test_load_weights_invalidates_each_layer_mhc_projection() -> None:
+    model = _tiny_model()
+    layer = model.block.layers[0]
+    assert layer.mhc_handler_attn is not layer.mhc_handler_mlp
+    attn = torch.compile(
+        lambda: layer.mhc_handler_attn._bf16_phi(layer.mhc_phi_fused_attn),
+        backend="eager", fullgraph=True,
+    )
+    mlp = torch.compile(
+        lambda: layer.mhc_handler_mlp._bf16_phi(layer.mhc_phi_fused_mlp),
+        backend="eager", fullgraph=True,
+    )
+    with torch.no_grad():
+        torch.testing.assert_close(attn(), layer.mhc_phi_fused_attn.bfloat16(), rtol=0, atol=0)
+        torch.testing.assert_close(mlp(), layer.mhc_phi_fused_mlp.bfloat16(), rtol=0, atol=0)
+        weights = {name: value.clone() for name, value in model.state_dict().items()}
+        weights["block.layers.0.mhc_phi_fused_attn"].fill_(1.0)
+        weights["block.layers.0.mhc_phi_fused_mlp"].fill_(2.0)
+        model.load_weights(weights.items())
+        torch.testing.assert_close(attn(), weights["block.layers.0.mhc_phi_fused_attn"].bfloat16(), rtol=0, atol=0)
+        torch.testing.assert_close(mlp(), weights["block.layers.0.mhc_phi_fused_mlp"].bfloat16(), rtol=0, atol=0)
+    torch._dynamo.reset()
+
+
 def test_layer_regions_bracket_the_eager_kernels() -> None:
     moe_layer, dense_layer = _tiny_model().block.layers
 

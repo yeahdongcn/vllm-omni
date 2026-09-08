@@ -818,8 +818,9 @@ class Magi2PreviewTransformer(nn.Module):
         """
 
         targets = self.state_dict(keep_vars=True)
-        self.mhc_handler_attn.invalidate_compiled_cache()
-        self.mhc_handler_mlp.invalidate_compiled_cache()
+        for layer in self.block.layers:
+            layer.mhc_handler_attn.invalidate_compiled_cache()
+            layer.mhc_handler_mlp.invalidate_compiled_cache()
         loaded: set[str] = set()
         for raw_name, checkpoint_tensor in weights:
             name = raw_name.removeprefix("transformer.")

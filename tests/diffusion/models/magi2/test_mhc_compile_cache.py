@@ -30,4 +30,8 @@ def test_compiled_phi_uses_current_argument_after_reload():
     torch.testing.assert_close(compiled_second(), second.bfloat16(), rtol=0, atol=0)
     # Distinct handlers prevent the attention cache from aliasing the MLP one.
     torch.testing.assert_close(compiled_first(), first.bfloat16(), rtol=0, atol=0)
+    second.copy_(3.0)
+    handler_mlp.invalidate_compiled_cache()
+    torch.testing.assert_close(compiled_second(), second.bfloat16(), rtol=0, atol=0)
+    torch.testing.assert_close(compiled_first(), first.bfloat16(), rtol=0, atol=0)
     torch._dynamo.reset()
