@@ -45,13 +45,14 @@ def main() -> None:
     report_environment(torch, args, swiglu7, "MAGI2_USE_FUSED_SWIGLU7")
     dtype = getattr(torch, args.dtype)
     out_dtype = getattr(torch, args.out_dtype or args.dtype)
+    device = torch.device("cuda")
     rtol = {torch.bfloat16: 1.6e-2, torch.float16: 2e-3, torch.float32: 1e-5}[out_dtype]
     atol = 1e-5 if out_dtype == torch.float32 else 2e-3
     op = swiglu7.SwiGLU7()
     with torch.inference_mode():
         for tokens in args.tokens:
             # Values outside both clamp boundaries exercise the released formula.
-            x = (torch.randn(tokens, 2 * args.intermediate_size, device="musa") * 10).to(dtype)
+            x = (torch.randn(tokens, 2 * args.intermediate_size, device=device) * 10).to(dtype)
             reference = partial(op.forward_native, x, out_dtype=out_dtype)
             fused = partial(op, x, out_dtype=out_dtype)
             parity = check_pair(torch, reference, fused, swiglu7, ("_swiglu7_kernel",), rtol=rtol, atol=atol)
