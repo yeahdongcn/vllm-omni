@@ -35,12 +35,15 @@ def load_musa(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Any:
     if min(*args.tokens, args.num_tests) <= 0 or args.warmup < 0:
         parser.error("tokens and num-tests must be positive; warmup must be nonnegative")
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
-    # Activate compatibility before MATE or vLLM imports capture CUDA APIs.
-    try:
-        importlib.import_module("torchada")
-    except ModuleNotFoundError as error:
-        if error.name != "torchada":
-            raise
+    # torchada is a MUSA-only adapter.  Import it before torch on MUSA so the
+    # benchmark can use the ordinary torch.cuda API on both backends.
+    musa_runtime = importlib.util.find_spec("torch_musa") is not None
+    if musa_runtime:
+        try:
+            importlib.import_module("torchada")
+        except ModuleNotFoundError as error:
+            if error.name != "torchada":
+                raise
     try:
         torch = importlib.import_module("torch")
     except ModuleNotFoundError as error:
@@ -48,13 +51,14 @@ def load_musa(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Any:
             raise
         emit(status="skip", reason="PyTorch is not installed; MUSA is unavailable")
         return None
-    if not hasattr(torch, "musa") and importlib.util.find_spec("torch_musa") is not None:
+    if not hasattr(torch, "musa") and musa_runtime:
         importlib.import_module("torch_musa")
-    if not (hasattr(torch, "musa") and torch.musa.is_available()):
-        emit(status="skip", reason="MUSA device is unavailable", torch=torch.__version__)
+    has_gpu = torch.cuda.is_available() or (musa_runtime and hasattr(torch, "musa") and torch.musa.is_available())
+    if not has_gpu:
+        emit(status="skip", reason="CUDA/MUSA device is unavailable", torch=torch.__version__)
         return None
     torch.manual_seed(args.seed)
-    torch.musa.manual_seed_all(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
     return torch
 
 
@@ -66,7 +70,7 @@ def report_environment(torch: Any, args: argparse.Namespace, module: ModuleType,
             packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             packages[name] = None
-    properties = torch.musa.get_device_properties(torch.musa.current_device())
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     try:
         source_sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
         source_dirty = bool(subprocess.check_output(["git", "-C", str(root), "status", "--porcelain"], text=True))
@@ -80,15 +84,15 @@ def report_environment(torch: Any, args: argparse.Namespace, module: ModuleType,
         source_sha=source_sha,
         source_dirty=source_dirty,
         kernel_source=module.__file__,
-        device=torch.musa.get_device_name(torch.musa.current_device()),
+        device=torch.cuda.get_device_name(torch.cuda.current_device()),
         sm_count=getattr(properties, "multi_processor_count", None),
-        musa_version=getattr(torch.version, "musa", None),
+        backend="musa" if getattr(torch.version, "musa", None) is not None else "cuda",
         packages=packages,
         env={name: os.environ.get(name) for name in (flag, "MUSA_VISIBLE_DEVICES", "TORCHDYNAMO_DISABLE")},
         config=vars(args),
         mode="eager operator diagnostic; no compile or graph capture",
         comparison=f"forward_native (equivalent to {flag}=0) versus CustomOp dispatch ({flag}=1)",
-        timing="mate.testing.utils.bench_gpu_time; MUSA events; alternating native/fused calls",
+        timing="mate.testing.utils.bench_gpu_time; CUDA-compatible events; alternating native/fused calls",
         timing_scope="whole callable, including device launch gaps; not isolated kernel duration",
         l2_flush=True,
         l2_flush_bytes=8192 * 1024 * 1024,
@@ -121,7 +125,7 @@ def check_pair(
         for name, probe in probes.items():
             setattr(module, name, probe)
         actual = fused()
-        torch.musa.synchronize()
+        torch.cuda.synchronize()
     finally:
         for name, probe in probes.items():
             setattr(module, name, probe.kernel)
@@ -166,14 +170,14 @@ def measure_pair(reference: Callable, fused: Callable, args: argparse.Namespace)
         repeat_iters=2 * args.num_tests,
         l2_flush=True,
         l2_flush_size_mb=8192,
-        l2_flush_device="musa",
+        l2_flush_device="musa" if getattr(torch, "musa", None) is not None and getattr(torch.version, "musa", None) is not None else "cuda",
     )
     # MATE also invokes the callable while estimating and warming up. The last
     # N recorded modes identify the timed calls without assuming its schedule.
     samples: tuple[list[float], list[float]] = ([], [])
     for mode, milliseconds in zip(order[-len(times_ms) :], times_ms, strict=True):
         if not math.isfinite(milliseconds) or milliseconds <= 0:
-            raise RuntimeError(f"Invalid MUSA event sample: {milliseconds}")
+            raise RuntimeError(f"Invalid GPU event sample: {milliseconds}")
         samples[mode].append(milliseconds * 1000)
     stats = {}
     for label, values in zip(("native", "fused"), samples, strict=True):

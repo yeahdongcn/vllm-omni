@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Compare native and fused MAGI-2 mHC post-processing on MUSA.
+"""Compare native and fused MAGI-2 mHC post-processing on CUDA or MUSA.
 
-Run from the checkout root with vLLM, vLLM-Omni, torchada, MUSA Triton and MATE::
+Run from the checkout root with PyTorch and the selected backend dependencies.
+torchada is loaded automatically only on MUSA::
 
     python -m benchmarks.kernels.benchmark_magi2_mhc \
         --tokens 1 4 16 64 129 4096 --hidden-size 3072 --num-tests 30
@@ -17,7 +18,7 @@ The three comparisons cover coefficient preparation, stream mixing, and their
 combined pipeline (including intermediate allocations, excluding projection,
 normalization and apply_pre). This is an eager operator diagnostic, without
 compile or graph capture. It does not measure full model performance.
-No MUSA device (or no PyTorch) produces a JSON skip record and exit status zero.
+No CUDA/MUSA device (or no PyTorch) produces a JSON skip record and exit status zero.
 """
 
 import argparse
@@ -127,7 +128,7 @@ def main() -> None:
     with torch.inference_mode():
         for tokens in args.tokens:
             benchmark_shape(torch, mhc, args, tokens)
-            torch.musa.empty_cache()
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
