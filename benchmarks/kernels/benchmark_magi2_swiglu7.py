@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Compare the native and fused MAGI-2 SwiGLU7 operators on MUSA.
+"""Compare native and fused MAGI-2 SwiGLU7 operators on CUDA or MUSA.
 
-Run from the checkout root in an environment with vLLM, vLLM-Omni, torchada,
-MUSA Triton and MATE installed::
+Run from the checkout root in an environment with PyTorch and the selected
+backend dependencies.  torchada is loaded automatically only on MUSA::
 
     python -m benchmarks.kernels.benchmark_magi2_swiglu7 \
         --tokens 1 4 16 64 129 4096 --intermediate-size 1280 --num-tests 30
@@ -13,7 +13,7 @@ are a synthetic sweep; pass per-rank sizes from the target trace for production
 comparisons. Input is contiguous interleaved gate/up [tokens, 2 * intermediate].
 Both paths evaluate FP32 arithmetic with one cast to the requested output dtype.
 This measures eager operator latency, not compiled serving performance.
-No MUSA device (or no PyTorch) produces a JSON skip record and exit status zero.
+No CUDA/MUSA device (or no PyTorch) produces a JSON skip record and exit status zero.
 """
 
 import argparse
@@ -76,7 +76,7 @@ def main() -> None:
                 **timing,
             )
             del x, reference, fused
-            torch.musa.empty_cache()
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
