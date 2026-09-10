@@ -38,18 +38,19 @@ from benchmarks.kernels._magi2_musa_bench import (
 
 def benchmark_shape(torch: Any, mhc: Any, args: argparse.Namespace, tokens: int) -> None:
     dtype = getattr(torch, args.dtype)
-    packed = torch.randn(tokens, 24, device="musa", dtype=torch.float32)
+    device = torch.device("cuda")
+    packed = torch.randn(tokens, 24, device=device, dtype=torch.float32)
     # Preserve the token stride of the model's shared projection allocation.
     post_inputs = (
         packed[:, 4:8],
         packed[:, 8:].view(tokens, 4, 4),
-        torch.tensor([0.8], device="musa"),
-        torch.randn(4, device="musa"),
-        torch.tensor([1.1], device="musa"),
-        torch.randn(4, 4, device="musa"),
+        torch.tensor([0.8], device=device),
+        torch.randn(4, device=device),
+        torch.tensor([1.1], device=device),
+        torch.randn(4, 4, device=device),
     )
-    streams = torch.randn(tokens, 4, args.hidden_size, device="musa", dtype=dtype)
-    branch = torch.randn(tokens, args.hidden_size, device="musa", dtype=dtype)
+    streams = torch.randn(tokens, 4, args.hidden_size, device=device, dtype=dtype)
+    branch = torch.randn(tokens, args.hidden_size, device=device, dtype=dtype)
     post_op, mix_op = mhc.MHCPostResidual(), mhc.MHCMix()
     scale = 1 / math.sqrt(4 * args.hidden_size)
     kwargs = dict(scale=scale, iterations=args.sinkhorn_iterations, epsilon=1e-12, out_dtype=dtype)
