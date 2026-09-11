@@ -415,3 +415,39 @@ def test_bf16_forward_matches_reference_routes_and_fp32_reduction(
         torch.testing.assert_close(result, reference, rtol=2e-2, atol=atol)
         relative_l2 = (result.float() - reference.float()).norm() / reference.float().norm().clamp_min(1e-6)
         assert relative_l2 < 1e-3
+
+
+@pytest.mark.parametrize(
+    "device_type",
+    [pytest.param("cuda", marks=[pytest.mark.cuda, pytest.mark.gpu]),
+     pytest.param("musa", marks=[pytest.mark.musa, pytest.mark.gpu])],
+)
+def test_bf16_reference_atomic_add_capability(device_type):
+    """The non-deterministic BF16 reference path must compile on each GPU.
+
+    This is intentionally separate from candidate parity: it exercises the
+    ``deterministic=False`` branch and therefore the ``tl.atomic_add`` used by
+    the original MAGI-2 reference path.  An unsupported backend must fail the
+    test with its compiler error instead of being silently treated as a skip.
+    """
+
+    device = _gpu_device(device_type)
+    inputs = _moe_inputs(
+        num_tokens=2,
+        num_heads=1,
+        hidden_size=64,
+        intermediate_size=96,
+        top_k=2,
+        num_experts=4,
+        seed=419,
+    )
+    x, probabilities, indices, gate, up, down = (tensor.to(device) for tensor in inputs)
+    gather_ids, sorted_probs, offsets = moe.global_sort_routes(probabilities, indices, 4)
+    actual = moe.triton_mh_moe_forward(
+        x, gather_ids, sorted_probs, offsets, gate, up, down, deterministic=False
+    )
+    deterministic = moe.triton_mh_moe_forward(
+        x, gather_ids, sorted_probs, offsets, gate, up, down, deterministic=True
+    )
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, deterministic, rtol=2e-2, atol=4e-2)
