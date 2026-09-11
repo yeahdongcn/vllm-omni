@@ -29,6 +29,7 @@ from .fused_moe_kernels import (
     triton_mh_moe_forward,
 )
 from .parallel import Magi2ParallelGroup, ep_dispatch, ep_undispatch, get_magi2_ep_group
+from vllm_omni.platforms import current_omni_platform
 
 RoutingScore = Literal["softmax", "sigmoid"]
 
@@ -132,14 +133,28 @@ def _bf16_fused_moe_forward(
     intermediate = torch.empty(
         (num_heads * num_tokens * top_k, intermediate_size), device=x_heads.device, dtype=x_heads.dtype
     )
-    config = {
-        "BLOCK_SIZE_M": 128,
-        "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 64,
-        "GROUP_SIZE_M": 16,
-        "num_warps": 16,
-        "num_stages": 1,
-    }
+    # Keep the qualified MUSA point unchanged.  CUDA/H20 benefits from the
+    # pre-Blackwell tile found by the MAGI-2 BF16 sweep (smaller K/warp count
+    # and deeper pipelining reduce register pressure).  The launch contract
+    # remains the same; only legal, device-specific values are selected.
+    if current_omni_platform.is_musa():
+        config = {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 16,
+            "num_warps": 16,
+            "num_stages": 1,
+        }
+    else:
+        config = {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 32,
+            "GROUP_SIZE_M": 16,
+            "num_warps": 4,
+            "num_stages": 3,
+        }
     invoke_fused_moe_bf16(
         hidden,
         packed_w13,
