@@ -35,6 +35,7 @@ from .parallel import (
     Magi2ParallelGroup,
     get_magi2_ulysses_group,
     scatter_heads_gather_seqlen,
+    scatter_seqlen_gather_head_shards,
     scatter_seqlen_gather_heads,
 )
 
@@ -356,10 +357,15 @@ def ulysses_packed_attention_with_sink(
     sink: torch.Tensor | None = None,
     group: Magi2ParallelGroup | None = None,
     sink_lse: torch.Tensor | None = None,
+    head_shard_output: bool = False,
 ) -> torch.Tensor:
     """MAGI-2 attention with overlapping Ulysses CP/head exchange.
 
     ``sink_lse`` optionally carries this rank's ``_sink_lse`` of ``sink``.
+
+    With ``head_shard_output`` a multi-rank exchange returns the
+    ``[S_rank, world, H, D]`` head-shard view of its receive buffer instead of
+    copying it to ``[S_rank, world*H, D]``.
     """
 
     group = group or get_magi2_ulysses_group()
@@ -371,7 +377,8 @@ def ulysses_packed_attention_with_sink(
             sink = _rank_sink(sink, group)
     output = packed_attention_with_sink(q, k, v, varlen, softcap=softcap, sink=sink, sink_lse=sink_lse)
     if group.world_size > 1:
-        output = scatter_seqlen_gather_heads(output.contiguous(), split_sizes, group)
+        gather = scatter_seqlen_gather_head_shards if head_shard_output else scatter_seqlen_gather_heads
+        output = gather(output.contiguous(), split_sizes, group)
         assert isinstance(output, torch.Tensor)
     return output
 
@@ -379,10 +386,11 @@ def ulysses_packed_attention_with_sink(
 class Magi2PackedAttentionKernel(nn.Module):
     """Model kernel plugged into the shared diffusion Attention contract."""
 
-    def __init__(self, softcap: float) -> None:
+    def __init__(self, softcap: float, *, head_shard_output: bool = False) -> None:
         super().__init__()
         self.softcap = softcap
         self._sink_lse_cache = _SinkLseCache()
+        self.head_shard_output = head_shard_output
 
     def forward(
         self,
@@ -413,6 +421,7 @@ class Magi2PackedAttentionKernel(nn.Module):
             sink=sink,
             group=group,
             sink_lse=self._sink_lse_cache.get(sink, group),
+            head_shard_output=self.head_shard_output,
         )
 
 

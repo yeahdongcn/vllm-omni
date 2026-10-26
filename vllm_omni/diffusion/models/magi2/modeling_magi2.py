@@ -44,6 +44,7 @@ from .parallel import (
     get_magi2_ep_split_indices,
     get_magi2_expert_parallel_config,
     get_magi2_ulysses_group,
+    pack_ulysses_head_shards,
 )
 
 
@@ -102,6 +103,12 @@ class Magi2Attention(nn.Module):
         self.num_heads_kv = config.num_heads_kv // self.tp_group.world_size
         self.q_size = self.num_heads_q * self.head_dim
         self.kv_size = self.num_heads_kv * self.head_dim
+        # On MUSA project() returns Q/K/V as head-shard views of one Ulysses
+        # send buffer, so the compiled projection stores them in send order,
+        # and output() receives the attention output in the same head shards.
+        ulysses_size = get_magi2_ulysses_group().world_size if current_omni_platform.is_musa() else 1
+        divisible = self.num_heads_q % ulysses_size == 0 and self.num_heads_kv % ulysses_size == 0
+        self.ulysses_head_shards = ulysses_size if divisible else 1
         self.sinks = nn.Parameter(torch.empty(config.attention_sink_tokens, self.num_heads_q, dtype=torch.float32))
         if self.tp_group.world_size > 1:
             self.sinks.checkpoint_weight_transform = self._shard_sinks
@@ -119,6 +126,8 @@ class Magi2Attention(nn.Module):
         # uneven Ulysses splits require a model kernel. Route it through the
         # framework Attention layer so compile/dispatch ownership remains
         # shared while the model kernel owns its specialized communication.
+        # On MUSA the kernel returns its Ulysses output as [T, world, H, D]
+        # head shards, which the compiled output() gathers in place.
         self.packed_attention = Attention(
             num_heads=self.num_heads_q,
             num_kv_heads=self.num_heads_kv,
@@ -128,7 +137,10 @@ class Magi2Attention(nn.Module):
             qkv_layout="THD",
             skip_sequence_parallel=True,
             disable_kv_quant=True,
-            custom_attention=Magi2PackedAttentionKernel(config.attention_softcap),
+            custom_attention=Magi2PackedAttentionKernel(
+                config.attention_softcap,
+                head_shard_output=current_omni_platform.is_musa(),
+            ),
         )
 
     def _shard_sinks(self, checkpoint_tensor: torch.Tensor) -> torch.Tensor:
@@ -167,6 +179,8 @@ class Magi2Attention(nn.Module):
         q = apply_rotary_emb(q, cos, sin).squeeze(0).to(self.config.params_dtype)
         k = apply_rotary_emb(k, cos, sin).squeeze(0).to(self.config.params_dtype)
         v = v.squeeze(0).to(self.config.params_dtype)
+        if self.ulysses_head_shards > 1:
+            q, k, v = pack_ulysses_head_shards((q, k, v), self.ulysses_head_shards)
         return q, k, v, gates
 
     def attend(
@@ -196,12 +210,22 @@ class Magi2Attention(nn.Module):
         gates: torch.Tensor,
         modality_dispatcher: ModalityDispatcher,
     ) -> torch.Tensor:
-        # Only the token count varies between calls; pinning the head count
-        # and head size lets a dynamic-shape compile index the attention output
-        # with constants.
-        torch._check(attention.shape[1:-1].numel() == self.num_heads_q)
-        torch._check(attention.shape[-1] == self.head_dim)
+        if attention.ndim == 4 and attention.shape[1] == self.ulysses_head_shards:
+            # [T, world, H, D] head shards from this module's Ulysses group.
+            # Only the token count varies between calls; pinning the head layout
+            # lets a dynamic-shape compile index the receive buffer with constants.
+            torch._check(attention.shape[2] == self.num_heads_q // self.ulysses_head_shards)
+            torch._check(attention.shape[3] == self.head_dim)
+        else:
+            # Only the token count varies between calls; pinning the head count
+            # and head size lets a dynamic-shape compile index the attention output
+            # with constants.
+            torch._check(attention.shape[1:-1].numel() == self.num_heads_q)
+            torch._check(attention.shape[-1] == self.head_dim)
         output = modality_dispatcher.permute(attention)
+        if output.ndim == 4:
+            # [T, world, H, D] Ulysses head shards, in head order.
+            output = output.flatten(1, 2)
         output = output * torch.sigmoid(gates)
         output = output.reshape(-1, self.q_size).to(self.config.params_dtype)
         return self.linear_proj(output, modality_dispatcher)
