@@ -165,16 +165,10 @@ MUSA_QK_FUSION_ENV = "VLLM_OMNI_MUSA_FUSED_QK_NORM_ROPE"
 
 
 def _musa_qk_fusion_enabled() -> bool:
-    """Whether MUSA may use the fused QK norm+RoPE, disabled unless requested.
+    """Whether MUSA may use the fused QK norm+RoPE, off unless the env asks for it.
 
-    The kernel is qualified on MUSA (``qk_fma_products`` returns False, i.e. keep
-    MUSA's separately rounded products), but it is not bit-exact there: it
-    reproduces ATen-CUDA's reduction order while MUSA's ``mean(-1)`` uses muDNN's,
-    which leaves 0.0022% of q/k elements one or two ulps away from the reference
-    chain. End to end that sits below the model's own run-to-run spread (PSNR
-    34.8 dB against 32.5 dB for two bit-exact configs rendered in different
-    processes), but a caller who requires bit-exactness must be able to turn it
-    off, so MUSA stays on the reference path unless asked.
+    The kernel is qualified on MUSA but is not bit-exact there, so a caller that
+    requires bit-exactness must be able to keep the reference path.
     """
     return os.environ.get(MUSA_QK_FUSION_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
