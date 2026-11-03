@@ -163,3 +163,19 @@ def test_qk_rope_qualifies_musa_with_unfused_products():
 def test_qk_rope_is_a_registered_custom_op():
     """A compiled region can only reach the fused kernel through a real custom op."""
     assert torch.ops.vllm_omni.qk_norm_rope.default is not None
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize(
+    "value, expected", [("", False), ("0", False), ("1", True), ("true", True), ("on", True), ("no", False)]
+)
+def test_musa_qk_fusion_is_opt_in(monkeypatch, value, expected):
+    """MUSA keeps the bit-exact reference path unless the env asks for the fusion."""
+    monkeypatch.setenv(fused_qk.MUSA_QK_FUSION_ENV, value)
+    assert fused_qk._musa_qk_fusion_enabled() is expected
+
+
+@pytest.mark.cpu
+def test_musa_qk_fusion_defaults_off(monkeypatch):
+    monkeypatch.delenv(fused_qk.MUSA_QK_FUSION_ENV, raising=False)
+    assert fused_qk._musa_qk_fusion_enabled() is False
