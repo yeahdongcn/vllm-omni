@@ -31,6 +31,7 @@ if HAS_TRITON:
         freq_stride1: tl.constexpr,
         eps: tl.constexpr,
         rows_per_block: tl.constexpr,
+        fuse_products: tl.constexpr,
     ):
         row = tl.program_id(0) * rows_per_block + tl.arange(0, rows_per_block)
         lane = tl.arange(0, 32)
@@ -77,10 +78,85 @@ if HAS_TRITON:
         cb = tl.load(freq_ptr + fi + freq_stride1, mask, 0)
         sb = tl.load(freq_ptr + fi + freq_stride1 + 1, mask, 0)
         out = row[:, None] * 128 + lane[None, :] * 4
-        tl.store(output_ptr + out, tl.fma(a, ca, -b * sa).to(tl.bfloat16), mask)
-        tl.store(output_ptr + out + 1, tl.fma(b, ca, a * sa).to(tl.bfloat16), mask)
-        tl.store(output_ptr + out + 2, tl.fma(c, cb, -d * sb).to(tl.bfloat16), mask)
-        tl.store(output_ptr + out + 3, tl.fma(d, cb, c * sb).to(tl.bfloat16), mask)
+        if fuse_products:
+            # CUDA's complex64 multiply fuses the real leading and imaginary
+            # trailing products; the other two round first.
+            r0 = tl.fma(a, ca, -b * sa)
+            r1 = tl.fma(b, ca, a * sa)
+            r2 = tl.fma(c, cb, -d * sb)
+            r3 = tl.fma(d, cb, c * sb)
+        else:
+            # Platforms without complex-tensor kernels rotate through a plain
+            # fp32 multiply/add sequence; keep that order to stay bit-exact.
+            r0 = a * ca - b * sa
+            r1 = b * ca + a * sa
+            r2 = c * cb - d * sb
+            r3 = d * cb + c * sb
+        tl.store(output_ptr + out, r0.to(tl.bfloat16), mask)
+        tl.store(output_ptr + out + 1, r1.to(tl.bfloat16), mask)
+        tl.store(output_ptr + out + 2, r2.to(tl.bfloat16), mask)
+        tl.store(output_ptr + out + 3, r3.to(tl.bfloat16), mask)
+
+
+def qk_fma_products(device: torch.device) -> bool | None:
+    """Whether the fused QK norm+RoPE fuses its products, or None when unqualified."""
+    if device.type == "musa":
+        return False
+    if supports_exact_rope(device):
+        return True
+    return None
+
+
+def _launch_qk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    wq: torch.Tensor,
+    wk: torch.Tensor,
+    f: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    fuse_products = qk_fma_products(q.device)
+    if fuse_products is None:
+        raise RuntimeError("qk_norm_rope is unqualified on this device")
+    oq = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+    ok = torch.empty_like(oq)
+    ff = torch.view_as_real(f)
+    _full[(triton.cdiv(q.numel() // 128, 4), 2)](
+        q,
+        k,
+        wq,
+        wk,
+        ff,
+        oq,
+        ok,
+        q.numel() // 128,
+        q.shape[1],
+        q.shape[2],
+        *q.stride()[:3],
+        *k.stride()[:3],
+        *ff.stride()[:2],
+        eps,
+        4,
+        fuse_products,
+        enable_fp_fusion=False,
+    )
+    return oq, ok
+
+
+if HAS_TRITON:
+
+    @torch.library.custom_op("vllm_omni::qk_norm_rope", mutates_args=())
+    def _qk_norm_rope(
+        q: torch.Tensor, k: torch.Tensor, wq: torch.Tensor, wk: torch.Tensor, f: torch.Tensor, eps: float
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Q/K RMSNorm plus interleaved RoPE as an opaque op for compiled regions."""
+        return _launch_qk(q, k, wq, wk, f, eps)
+
+    @_qk_norm_rope.register_fake
+    def _(
+        q: torch.Tensor, k: torch.Tensor, wq: torch.Tensor, wk: torch.Tensor, f: torch.Tensor, eps: float
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.empty_like(q), torch.empty_like(k)
 
 
 def qk_rotary(
@@ -93,7 +169,7 @@ def qk_rotary(
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     if (
         not HAS_TRITON
-        or q.device.type != "cuda"
+        or q.device.type not in ("cuda", "musa")
         or q.dtype != torch.bfloat16
         or q.ndim != 4
         or q.shape != k.shape
@@ -114,32 +190,9 @@ def qk_rotary(
         or f.device != q.device
         or f.shape != (q.shape[1], 64)
         or q.numel() == 0
-        or torch.compiler.is_compiling()
         or torch.is_grad_enabled()
     ):
         return None
-    if not supports_exact_rope(q.device):
+    if qk_fma_products(q.device) is None:
         return None
-
-    oq = torch.empty(q.shape, device=q.device, dtype=q.dtype)
-    ok = torch.empty_like(oq)
-    ff = torch.view_as_real(f)
-    _full[(triton.cdiv(q.numel() // 128, 4), 2)](
-        q,
-        k,
-        wq,
-        wk,
-        ff,
-        oq,
-        ok,
-        q.numel() // 128,
-        q.shape[1],
-        q.shape[2],
-        *q.stride()[:3],
-        *k.stride()[:3],
-        *ff.stride()[:2],
-        eps,
-        4,
-        enable_fp_fusion=False,
-    )
-    return oq, ok
+    return _qk_norm_rope(q, k, wq, wk, f, eps)

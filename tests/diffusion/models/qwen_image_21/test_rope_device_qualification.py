@@ -150,3 +150,16 @@ def test_unqualified_attention_uses_reference_norm_and_rope(monkeypatch):
     result = attention(torch.empty(2, sequence, 4096, device="cuda", dtype=torch.bfloat16), freqs)
     assert observed == [True]
     torch.testing.assert_close(result, projection[:, :, 2].flatten(2), rtol=0, atol=0)
+
+
+@pytest.mark.cpu
+def test_qk_rope_qualifies_musa_with_unfused_products():
+    """The fused Q/K norm+RoPE keeps MUSA's reference rotation order (no FMA)."""
+    assert fused_qk.qk_fma_products(torch.device("musa")) is False
+    assert fused_qk.qk_fma_products(torch.device("cpu")) is None
+
+
+@pytest.mark.cpu
+def test_qk_rope_is_a_registered_custom_op():
+    """A compiled region can only reach the fused kernel through a real custom op."""
+    assert torch.ops.vllm_omni.qk_norm_rope.default is not None
